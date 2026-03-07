@@ -178,3 +178,4 @@ docker-compose.override.yml
 *.gz
 *.zip
 *.rar
+*.mp4
