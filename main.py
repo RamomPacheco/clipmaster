@@ -8,6 +8,30 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any
 
+
+# ==========================================
+# BOOTSTRAP: Injeção de Ambiente CUDA
+# ==========================================
+def _inject_cuda_environment():
+    """
+    Força o Python a encontrar as DLLs do CUDA na raiz do projeto.
+    """
+    project_root = os.getcwd()
+
+    # Adiciona ao PATH
+    os.environ["PATH"] = project_root + os.pathsep + os.environ.get("PATH", "")
+
+    # Registra o diretório no Python
+    if hasattr(os, "add_dll_directory"):
+        try:
+            os.add_dll_directory(project_root)
+            print(f"Diretório CUDA injetado: {project_root}")
+        except Exception as e:
+            print(f"Falha ao injetar DLL directory: {e}")
+
+
+_inject_cuda_environment()
+
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -113,27 +137,43 @@ class VideoProcessorThread(QThread):
 
     def _init_whisper_model(self) -> WhisperModel:
         """
-        Inicializa o Whisper otimizado para GPU (CUDA) com float16.
-        Possui fallback automático para CPU (int8) caso a GPU falhe.
+        Inicializa o Whisper otimizado para CPU (int8) para evitar problemas com CUDA.
         """
-        try:
-            self.progress_signal.emit(
-                "Inicializando IA de transcrição via GPU (CUDA)..."
+        self.progress_signal.emit(
+            "Inicializando IA de transcrição via CPU (mais lento, mas estável)..."
+        )
+        return WhisperModel("base", device="cpu", compute_type="int8")
+
+    def _transcribe_safely(self, audio_path: str) -> tuple[List[Dict[str, Any]], float]:
+        """
+        Isola o Whisper numa bolha. Ao retornar, o Python limpa a VRAM
+        naturalmente sem causar Segmentation Fault no motor C++.
+        """
+        model = self._init_whisper_model()
+        self.progress_signal.emit("Iniciando transcrição profunda com Whisper...")
+
+        # Podemos usar vad_filter=True com segurança aqui, pois o áudio já é um .wav puro
+        segments_generator, info = model.transcribe(
+            audio_path, beam_size=2, vad_filter=True
+        )
+
+        segments = []
+        max_duration = float(info.duration)
+
+        for s in segments_generator:
+            segments.append(
+                {"start": float(s.start), "end": float(s.end), "text": str(s.text)}
             )
-            model = WhisperModel("base", device="cuda", compute_type="float16")
-            logger.info("Whisper carregado com sucesso na GPU.")
-            return model
-        except Exception as cuda_error:
-            logger.warning(
-                f"Erro ao inicializar CUDA: {cuda_error}. Aplicando Fallback para CPU."
-            )
-            self.progress_signal.emit(
-                "Aviso: CUDA indisponível ou incompleto. Usando processador (CPU)..."
-            )
-            return WhisperModel("base", device="cpu", compute_type="int8")
+            if len(segments) % 15 == 0:
+                self.progress_signal.emit(
+                    f"Transcrevendo... {s.end:.2f}s processados de {max_duration:.2f}s"
+                )
+
+        # Quando a função chega no 'return', o modelo e o gerador são destruídos suavemente pelo Python
+        return segments, max_duration
 
     def run(self):
-        """Orquestrador principal com Chunking para vídeos ilimitados."""
+        """Orquestrador principal com Chunking para vídeos ilimitados e trava de 60s."""
         if not self.check_dependencies():
             return
 
@@ -141,81 +181,110 @@ class VideoProcessorThread(QThread):
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
             # ==========================================
-            # FASE 1: TRANSCRIÇÃO E LIMPEZA
+            # FASE 0: PREPARAÇÃO DO ÁUDIO (Blindagem)
             # ==========================================
-            model = self._init_whisper_model()
-            self.progress_signal.emit(
-                "Lendo o vídeo e transcrevendo o áudio completo..."
+            self.progress_signal.emit("Preparando arquivo de áudio leve (FFmpeg)...")
+            temp_audio_path = self.output_dir / "temp_audio_safe.wav"
+
+            cmd_audio = [
+                "ffmpeg",
+                "-y",
+                "-i",
+                self.video_path,
+                "-vn",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                str(temp_audio_path),
+            ]
+            subprocess.run(
+                cmd_audio, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True
             )
 
-            segments_generator, _ = model.transcribe(self.video_path, beam_size=2)
-            segments = list(segments_generator)
+            # ==========================================
+            # FASE 1: TRANSCRIÇÃO (Escopo Isolado e Seguro)
+            # ==========================================
+            # Chama a função bolha. Quando ela retorna, o Whisper já foi destruído em segurança.
+            segments, max_video_duration = self._transcribe_safely(str(temp_audio_path))
 
-            if not segments:
-                raise ValueError("A transcrição não gerou texto útil.")
-
-            max_video_duration = segments[-1].end
-
-            # Limpeza cirúrgica de VRAM
             self.progress_signal.emit(
-                "Limpando VRAM para dar potência total à IA de Análise..."
+                "Transcrição concluída. A preparar motor de Análise (Ollama)..."
             )
+
+            # Limpa o arquivo de áudio temporário do HD
+            if temp_audio_path.exists():
+                try:
+                    temp_audio_path.unlink()
+                except Exception:
+                    pass
+
             import gc
 
-            del model  # Destrói o Whisper
-            gc.collect()  # Libera a memória da placa de vídeo
+            gc.collect()  # Agora a coleta de lixo é inofensiva e garante os 12GB pro Ollama.
 
             # ==========================================
-            # FASE 2: CHUNKING (DIVIDIR PARA CONQUISTAR)
+            # FASE 2: CHUNKING MICRO (Fatias de 10 Minutos)
             # ==========================================
-            CHUNK_SECONDS = 1800.0  # 30 minutos em segundos
+            # Mantenha 600.0 (10 minutos). É o limite perfeito para o Ollama com 8192 tokens.
+            CHUNK_SECONDS = 600.0
             chapters = []
             current_chunk = []
             chunk_start = 0.0
 
             for s in segments:
-                # Se o segmento atual passar do limite de 30 minutos, fechamos o capítulo
-                if s.end - chunk_start > CHUNK_SECONDS and current_chunk:
+                if s["end"] - chunk_start > CHUNK_SECONDS and current_chunk:
                     chapters.append(current_chunk)
                     current_chunk = [s]
-                    chunk_start = s.start
+                    chunk_start = s["start"]
                 else:
                     current_chunk.append(s)
 
             if current_chunk:
-                chapters.append(current_chunk)  # Adiciona o trecho final
+                chapters.append(current_chunk)
+
+            # Daqui para baixo, o código da FASE 3 e FASE 4 continua INTACTO...
 
             # ==========================================
-            # FASE 3: ANÁLISE EM LOTE (BATCH INFERENCE)
+            # FASE 3: ANÁLISE EM LOTE E TRAVA MICRO (30s a 60s)
             # ==========================================
             all_clips = []
             total_chapters = len(chapters)
 
             for i, chunk in enumerate(chapters):
                 self.progress_signal.emit(
-                    f"IA analisando Parte {i+1} de {total_chapters} (Máximo Contexto)..."
+                    f"IA analisando Parte {i+1} de {total_chapters} (Contexto de 3 min)..."
                 )
 
-                # Monta a transcrição apenas deste capítulo de 30min
+                # Monta o texto apenas deste pedaço
                 chunk_text = "\n".join(
-                    [f"[{s.start:.2f}s - {s.end:.2f}s]: {s.text}" for s in chunk]
+                    [
+                        f"[{s['start']:.2f}s - {s['end']:.2f}s]: {s['text']}"
+                        for s in chunk
+                    ]
                 )
 
-                # Extrai os clipes desta parte
+                # A IA escolhe os melhores momentos
                 clips = self._analyze_viral_potential(chunk_text)
                 all_clips.extend(clips)
 
-            # [NOVO] Proteção matemática para não sobrepor tempos no FFmpeg
+            # [A GUILHOTINA MATEMÁTICA]
+            # Força o mínimo de 30s e o teto absoluto de 60s para o YouTube Shorts
             all_clips = self._enforce_duration_limits(
-                all_clips, max_video_duration, 30.0, 60.0
+                all_clips, max_video_duration, min_seconds=30.0, max_seconds=60.0
             )
 
             # ==========================================
-            # FASE 4: RENDERIZAÇÃO
+            # FASE 4: RENDERIZAÇÃO PELA GPU (NVENC)
             # ==========================================
             if not all_clips:
                 self.progress_signal.emit(
                     "Aviso: A IA não encontrou nenhum clipe viral forte o suficiente."
+                )
+                self.finished_signal.emit(
+                    "Processamento concluído sem clipes extraídos."
                 )
                 return
 
@@ -270,7 +339,7 @@ class VideoProcessorThread(QThread):
                 ],
                 format="json",
                 options={
-                    "num_ctx": 16384,  # Seguro para blocos de 30 minutos em placas de 12GB
+                    "num_ctx": 8192,  # Seguro para blocos de 15 minutos em placas de 12GB
                     "temperature": 0.1,
                     "top_p": 0.9,
                 },
@@ -283,6 +352,12 @@ class VideoProcessorThread(QThread):
 
             return json.loads(match.group(0).strip())
 
+        except ollama.ResponseError as e:
+            logger.error(f"Erro na resposta do Ollama: {e}")
+            return []
+        except json.JSONDecodeError as e:
+            logger.error(f"Erro ao decodificar JSON: {e}")
+            return []
         except Exception as e:
             logger.error(f"Falha ao extrair clipes deste capítulo: {e}")
             return (
@@ -430,6 +505,17 @@ class ViralApp(QMainWindow):
         self._setup_ui()
         self._apply_dark_theme()
 
+    def _get_available_models(self):
+        """Busca os modelos disponíveis no Ollama."""
+        try:
+            import ollama
+
+            models = ollama.list()
+            return [model["name"] for model in models.get("models", [])]
+        except Exception as e:
+            logger.warning(f"Erro ao buscar modelos Ollama: {e}")
+            return ["phi4", "llama3", "mistral"]  # Fallback
+
     def _setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -454,10 +540,9 @@ class ViralApp(QMainWindow):
         lbl_model.setStyleSheet("font-size: 14px; font-weight: bold; color: #dddddd;")
 
         self.combo_model = QComboBox()
-        self.combo_model.addItems(
-            ["phi4", "llama3.1", "llama3", "qwen2.5:32b", "mistral"]
-        )
-        self.combo_model.setToolTip("Selecione o modelo que você já baixou no Ollama.")
+        available_models = self._get_available_models()
+        self.combo_model.addItems(available_models)
+        self.combo_model.setToolTip("Selecione o modelo disponível no Ollama.")
         self.combo_model.setMinimumHeight(30)
 
         config_layout.addWidget(lbl_model)
@@ -559,6 +644,18 @@ class ViralApp(QMainWindow):
             return
 
         model_selected = self.combo_model.currentText()
+
+        # Verifica se o modelo está disponível
+        available_models = self._get_available_models()
+        if model_selected not in available_models:
+            self.update_log(
+                f"[!] ERRO: Modelo '{model_selected}' não encontrado no Ollama."
+            )
+            self.update_log(f"[!] Modelos disponíveis: {', '.join(available_models)}")
+            self._unlock_ui_after_process()
+            self.btn_action.setText("Selecionar Modelo Válido")
+            return
+
         self.update_log(f"[*] Iniciando motor com IA: {model_selected.upper()}")
 
         # Trava a interface
