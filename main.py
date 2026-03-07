@@ -47,15 +47,16 @@ class VideoProcessorThread(QThread):
     Garante que a interface gráfica (PySide6) não congele.
     """
 
-    def _enforce_minimum_duration(
+    def _enforce_duration_limits(
         self,
         clips: List[Dict[str, Any]],
-        max_duration: float,
+        max_video_duration: float,
         min_seconds: float = 30.0,
+        max_seconds: float = 60.0,
     ) -> List[Dict[str, Any]]:
         """
-        Garante que nenhum clipe tenha menos que `min_seconds`.
-        Se for menor, expande as bordas dinamicamente mantendo o assunto centralizado.
+        Trava de Backend rigorosa. Garante que os clipes fiquem entre 30s e 60s.
+        A IA é péssima em matemática, então o Python corrige na força bruta se necessário.
         """
         for i, clip in enumerate(clips):
             start = float(clip.get("start", 0.0))
@@ -65,35 +66,29 @@ class VideoProcessorThread(QThread):
 
             if duration < min_seconds:
                 logger.info(
-                    f"Clipe {i+1} muito curto ({duration:.1f}s). Expandindo contexto para {min_seconds}s..."
+                    f"Clipe {i+1} curto ({duration:.1f}s). Expandindo para {min_seconds}s..."
                 )
-
-                # Calcula quanto tempo falta
                 deficit = min_seconds - duration
+                new_start = max(0.0, start - (deficit / 2.0))
+                new_end = min(max_video_duration, end + (deficit / 2.0))
 
-                # Tenta expandir igualmente para trás e para frente (para manter o gancho no meio)
-                new_start = start - (deficit / 2.0)
-                new_end = end + (deficit / 2.0)
-
-                # Valida as bordas (não pode ser menor que 0 nem maior que o vídeo original)
-                if new_start < 0.0:
-                    new_end += abs(new_start)  # Joga o tempo que faltou para o final
-                    new_start = 0.0
-
-                if new_end > max_duration:
-                    new_start -= (
-                        new_end - max_duration
-                    )  # Puxa o tempo excedente para o início
-                    new_end = max_duration
-
-                # Trava de segurança final para vídeos que no total têm menos de 30s
-                new_start = max(0.0, new_start)
+                # Se bateu no zero e ainda não tem 30s, joga o tempo pro final
+                if (new_end - new_start) < min_seconds:
+                    new_end = min(max_video_duration, new_start + min_seconds)
 
                 clip["start"] = round(new_start, 2)
                 clip["end"] = round(new_end, 2)
+                clip["reason"] += " [Nota de Backend: Expandido para 30s]"
+
+            elif duration > max_seconds:
+                logger.warning(
+                    f"Clipe {i+1} excedeu o limite do YouTube Shorts ({duration:.1f}s). Guilhotina aplicada em 60s."
+                )
+                # Mantemos o "start" (o gancho inicial é sagrado) e forçamos o "end"
+                clip["end"] = round(start + max_seconds, 2)
                 clip[
                     "reason"
-                ] += " [Nota: O sistema expandiu este trecho para garantir o contexto completo.]"
+                ] += " [Nota de Backend: Final cortado para respeitar teto de 60s]"
 
         return clips
 
@@ -138,48 +133,96 @@ class VideoProcessorThread(QThread):
             return WhisperModel("base", device="cpu", compute_type="int8")
 
     def run(self):
-        """Orquestrador principal do pipeline de processamento."""
+        """Orquestrador principal com Chunking para vídeos ilimitados."""
         if not self.check_dependencies():
             return
 
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
-            # 1. Transcrição de Áudio (Whisper)
+            # ==========================================
+            # FASE 1: TRANSCRIÇÃO E LIMPEZA
+            # ==========================================
             model = self._init_whisper_model()
-            self.progress_signal.emit("Lendo o vídeo e transcrevendo o áudio...")
+            self.progress_signal.emit(
+                "Lendo o vídeo e transcrevendo o áudio completo..."
+            )
 
-            # Convertendo para lista para sabermos o tamanho e o final do vídeo
-            segments_generator, _ = model.transcribe(self.video_path, beam_size=5)
+            segments_generator, _ = model.transcribe(self.video_path, beam_size=2)
             segments = list(segments_generator)
 
             if not segments:
-                raise ValueError(
-                    "A transcrição não gerou texto útil. O vídeo tem áudio claro?"
-                )
+                raise ValueError("A transcrição não gerou texto útil.")
 
-            # Descobre a duração total baseada na última fala detectada
             max_video_duration = segments[-1].end
 
-            full_text = "\n".join(
-                [f"[{s.start:.2f}s - {s.end:.2f}s]: {s.text}" for s in segments]
-            )
-
-            # 2. Análise de Viralidade (Ollama)
+            # Limpeza cirúrgica de VRAM
             self.progress_signal.emit(
-                f"Analisando métricas de viralidade com {self.model_name}..."
+                "Limpando VRAM para dar potência total à IA de Análise..."
             )
-            clips = self._analyze_viral_potential(full_text)
+            import gc
 
-            # [NOVO] 2.5: Força a duração mínima garantindo o contexto
-            clips = self._enforce_minimum_duration(
-                clips, max_video_duration, min_seconds=30.0
+            del model  # Destrói o Whisper
+            gc.collect()  # Libera a memória da placa de vídeo
+
+            # ==========================================
+            # FASE 2: CHUNKING (DIVIDIR PARA CONQUISTAR)
+            # ==========================================
+            CHUNK_SECONDS = 1800.0  # 30 minutos em segundos
+            chapters = []
+            current_chunk = []
+            chunk_start = 0.0
+
+            for s in segments:
+                # Se o segmento atual passar do limite de 30 minutos, fechamos o capítulo
+                if s.end - chunk_start > CHUNK_SECONDS and current_chunk:
+                    chapters.append(current_chunk)
+                    current_chunk = [s]
+                    chunk_start = s.start
+                else:
+                    current_chunk.append(s)
+
+            if current_chunk:
+                chapters.append(current_chunk)  # Adiciona o trecho final
+
+            # ==========================================
+            # FASE 3: ANÁLISE EM LOTE (BATCH INFERENCE)
+            # ==========================================
+            all_clips = []
+            total_chapters = len(chapters)
+
+            for i, chunk in enumerate(chapters):
+                self.progress_signal.emit(
+                    f"IA analisando Parte {i+1} de {total_chapters} (Máximo Contexto)..."
+                )
+
+                # Monta a transcrição apenas deste capítulo de 30min
+                chunk_text = "\n".join(
+                    [f"[{s.start:.2f}s - {s.end:.2f}s]: {s.text}" for s in chunk]
+                )
+
+                # Extrai os clipes desta parte
+                clips = self._analyze_viral_potential(chunk_text)
+                all_clips.extend(clips)
+
+            # [NOVO] Proteção matemática para não sobrepor tempos no FFmpeg
+            all_clips = self._enforce_duration_limits(
+                all_clips, max_video_duration, 30.0, 60.0
             )
 
-            # 3. Recorte e Renderização (FFmpeg -> ProRes)
-            self._process_video_clips(clips)
+            # ==========================================
+            # FASE 4: RENDERIZAÇÃO
+            # ==========================================
+            if not all_clips:
+                self.progress_signal.emit(
+                    "Aviso: A IA não encontrou nenhum clipe viral forte o suficiente."
+                )
+                return
+
+            self._process_video_clips(all_clips)
+
             self.finished_signal.emit(
-                f"Sucesso! Arquivos e insights salvos em:\n{self.output_dir.absolute()}"
+                f"Sucesso! {len(all_clips)} clipes gerados e salvos em:\n{self.output_dir.absolute()}"
             )
 
         except subprocess.CalledProcessError as sub_e:
@@ -192,76 +235,59 @@ class VideoProcessorThread(QThread):
 
     def _analyze_viral_potential(self, text: str) -> List[Dict[str, Any]]:
         """
-        Comunica-se com o modelo local do Ollama para extrair TODOS os ganchos virais.
-        A IA decide a quantidade baseada na qualidade do conteúdo.
+        Prompt Nível Sênior: Força a IA a agir como um Diretor de Edição,
+        priorizando a integridade da frase e a lógica do contexto.
         """
         import re
 
-        prompt = f"""
-        Você é um especialista em retenção de audiência e edição para TikTok/Reels/Shorts.
-        Analise a transcrição deste vídeo e identifique TODOS os trechos com alto potencial viral.
-        
-        REGRA DE OURO (CONTEXTO E QUANTIDADE):
-        1. NÃO HÁ LIMITE de clipes. Retorne quantos clipes forem realmente excelentes (podem ser 2, 5, 10 ou mais).
-        2. PRIORIZE A QUALIDADE. Se o vídeo for monótono, retorne apenas os 1 ou 2 momentos que se salvam. Se for um conteúdo denso e genial, extraia todos os recortes possíveis.
-        3. Um bom vídeo viral precisa de contexto completo (início, meio da explicação e fim impactante). Indique trechos de no mínimo 30 a 60 segundos.
-        
-        Retorne APENAS um array JSON puro. Não adicione NENHUM texto explicativo antes ou depois.
-        Formato obrigatório rigoroso: 
-        [
-            {{"start": 0.0, "end": 45.0, "reason": "Apresenta o problema X e conclui com a solução Y", "headline": "A Verdade sobre X"}},
-            {{"start": 120.0, "end": 165.0, "reason": "História completa que prende a atenção", "headline": "História Incrível"}}
-        ]
-        
-        Transcrição do vídeo: 
+        system_prompt = """Você é um Diretor de Edição Sênior especialista em retenção para TikTok e YouTube Shorts.
+        Sua ÚNICA função é extrair blocos de tempo. Retorne APENAS um array JSON puro."""
+
+        user_prompt = f"""
+        Analise esta fatiada da transcrição e encontre os momentos mais magnéticos.
+
+        REGRAS DE OURO (CRÍTICAS):
+        1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
+        2. COERÊNCIA: O clipe deve começar no início exato do raciocínio e terminar na conclusão.
+        3. FOCO: Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
+
+        --- TRANSCRIÇÃO ---
         {text}
+        --- FIM DA TRANSCRIÇÃO ---
+
+        Retorne APENAS o JSON rigoroso: 
+        [
+            {{"start": 10.5, "end": 55.0, "reason": "Motivo", "headline": "Título"}}
+        ]
         """
+
         try:
             response = ollama.chat(
-                model=self.model_name, messages=[{"role": "user", "content": prompt}]
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                format="json",
+                options={
+                    "num_ctx": 16384,  # Seguro para blocos de 30 minutos em placas de 12GB
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                },
             )
             raw_content = response["message"]["content"]
 
-            # Regex poderoso: Busca TUDO que estiver entre os colchetes principais
             match = re.search(r"\[.*\]", raw_content, re.DOTALL)
-
             if not match:
-                logger.error(
-                    f"IA falhou ao retornar array JSON. Resposta bruta:\n{raw_content}"
-                )
-                raise ValueError("Nenhum array JSON encontrado na resposta da IA.")
+                return []
 
-            json_str = match.group(0).strip()
-
-            # Força o carregamento do JSON sanitizado
-            clips = json.loads(json_str)
-
-            logger.info(f"[*] A IA identificou {len(clips)} clipes virais neste vídeo!")
-            return clips
-
-        except json.JSONDecodeError as je:
-            logger.error(f"Erro de parsing JSON (A IA formatou mal os dados): {je}")
-            return [
-                {
-                    "start": 0.0,
-                    "end": 30.0,
-                    "reason": "Fallback: IA retornou formato inválido",
-                    "headline": "Melhor Momento Automático",
-                }
-            ]
+            return json.loads(match.group(0).strip())
 
         except Exception as e:
-            logger.warning(
-                f"Falha na comunicação com a IA: {e}. Aplicando clips padrão."
-            )
-            return [
-                {
-                    "start": 0.0,
-                    "end": 30.0,
-                    "reason": "Trecho de segurança",
-                    "headline": "Primeiros 30s",
-                }
-            ]
+            logger.error(f"Falha ao extrair clipes deste capítulo: {e}")
+            return (
+                []
+            )  # Se falhar num capítulo, retorna vazio para não quebrar o programa inteiro
 
     def _process_video_clips(self, clips: List[Dict[str, Any]]):
         """Converte e corta os trechos selecionados para H.264 (MP4) com qualidade máxima de frame."""
