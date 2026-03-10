@@ -36,13 +36,8 @@ def transcribe_audio(
     max_duration = float(info.duration)
 
     for s in segments_generator:
-        segments.append(
-            {"start": float(s.start), "end": float(s.end), "text": str(s.text)}
-        )
+        segments.append({"start": float(s.start), "end": float(s.end), "text": str(s.text)})
         if len(segments) % 15 == 0:
-            logger.info(
-                "Transcrevendo... %.2fs processados de %.2fs", s.end, max_duration
-            )
+            logger.info("Transcrevendo... %.2fs processados de %.2fs", s.end, max_duration)
 
     return segments, max_duration
-

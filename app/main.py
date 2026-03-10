@@ -9,18 +9,33 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 
-
 # ==========================================
 # BOOTSTRAP: Injeção de Ambiente CUDA
 # ==========================================
+
+
 def _inject_cuda_environment():
     """
-    Força o Python a encontrar as DLLs do CUDA na raiz do projeto.
+    Injeta dependências CUDA de forma cross-platform (Windows e Linux).
     """
     project_root = os.getcwd()
 
-    # Adiciona ao PATH
-    os.environ["PATH"] = project_root + os.pathsep + os.environ.get("PATH", "")
+    if sys.platform == "win32":
+        # Configuração exclusiva para Windows (.dll e PATH)
+        os.environ["PATH"] = project_root + os.pathsep + os.environ.get("PATH", "")
+        if hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(project_root)
+                print("[*] Ambiente CUDA injetado para Windows.")
+            except Exception as e:
+                print(f"[!] Falha ao injetar DLL directory: {e}")
+
+    elif sys.platform.startswith("linux"):
+        # Configuração para Linux (.so e LD_LIBRARY_PATH)
+        os.environ["LD_LIBRARY_PATH"] = (
+            project_root + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
+        )
+        print("[*] Ambiente CUDA configurado para Linux.")
 
     # Registra o diretório no Python
     if hasattr(os, "add_dll_directory"):

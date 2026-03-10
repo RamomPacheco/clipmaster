@@ -9,7 +9,7 @@
 3. **Renderização com FFmpeg** - Corta e exporta os clipes em MP4 H.264
 
 ---
-
+### 💙 [Se gostou, faça uma doação ☕](https://livepix.gg/ramompacheco)
 ## 🔧 INSTALAÇÃO
 
 ### Pré-requisitos do Sistema
@@ -34,7 +34,7 @@ python --version  # Verificar se é 3.10+
    - Download: https://ollama.ai
    - Após instalar, execute no terminal:
      ```powershell
-     ollama pull llama3.2:3b  # Modelo padrão
+     ollama pull phi4       # Modelo com melhor resposta 
      ollama serve           # Rodar o servidor (em outro terminal)
      ```
 
@@ -51,12 +51,14 @@ python -m venv .venv
 ```
 
 3. **Ativar ambiente virtual**
-```powershell
-# Windows PowerShell:
-.\.venv\Scripts\Activate.ps1
+```# 3. Ative o ambiente virtual
+# -> No Windows (PowerShell/CMD):
+.venv\Scripts\activate
+# -> No Linux/Mac:
+source .venv/bin/activate
 
-# Ou CMD:
-.\.venv\Scripts\activate.bat
+# 4. Instale as dependências rigorosamente mapeadas
+pip install -r requirements.txt
 ```
 
 4. **Instalar dependências**
@@ -473,3 +475,4 @@ exports/
 5. **Customizar**: Edite os prompts em `llm_analyzer.py` para seu estilo
 
 ---
+### 💙 [Se gostou, faça uma doação ☕](https://livepix.gg/ramompacheco)
