@@ -5,6 +5,7 @@ import json
 import logging
 import subprocess
 import re
+import time
 from pathlib import Path
 from typing import List, Dict, Any
 
@@ -51,6 +52,8 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QScrollArea,
     QLineEdit,
+    QGroupBox,
+    QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 import ollama
@@ -181,6 +184,9 @@ class VideoProcessorThread(QThread):
         model_name: str,
         output_dir: str = None,
         prompt_type: str = "Padrão (Equilibrado)",
+        resolution: str = "1080p",
+        bitrate: str = "",
+        custom_prompt: str = None,
     ):
         super().__init__()
         self.video_path = video_path
@@ -194,6 +200,24 @@ class VideoProcessorThread(QThread):
 
         self.prompt_type = prompt_type  # Tipo de prompt selecionado
         self.selected_clips = None  # Armazena os clips selecionados pelo usuário
+
+        # Métricas de performance
+        self.performance_metrics = {
+            "start_time": None,
+            "transcription_time": 0,
+            "analysis_time": 0,
+            "rendering_time": 0,
+            "total_clips_found": 0,
+            "clips_selected": 0,
+            "video_duration": 0,
+            "model_used": model_name,
+            "prompt_type": prompt_type
+        }
+
+        # Configurações avançadas
+        self.resolution = resolution
+        self.bitrate = bitrate
+        self.custom_prompt = custom_prompt
 
     def check_dependencies(self) -> bool:
         """Verifica se o FFmpeg está acessível no sistema."""
@@ -247,6 +271,7 @@ class VideoProcessorThread(QThread):
             return
 
         try:
+            self.performance_metrics["start_time"] = time.time()
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
             # ==========================================
@@ -279,6 +304,8 @@ class VideoProcessorThread(QThread):
             # Chama a função bolha. Quando ela retorna, o Whisper já foi destruído em segurança.
             segments, max_video_duration = self._transcribe_safely(str(temp_audio_path))
 
+            self.performance_metrics["transcription_time"] = time.time() - self.performance_metrics["start_time"]
+
             self.progress_signal.emit(
                 "Transcrição concluída. A preparar motor de Análise (Ollama)..."
             )
@@ -293,6 +320,8 @@ class VideoProcessorThread(QThread):
             import gc
 
             gc.collect()  # Agora a coleta de lixo é inofensiva e garante os 12GB pro Ollama.
+
+            analysis_start = time.time()
 
             # ==========================================
             # FASE 2: CHUNKING MICRO (Fatias de 10 Minutos)
@@ -339,6 +368,8 @@ class VideoProcessorThread(QThread):
                 clips = self._analyze_viral_potential(chunk_text)
                 all_clips.extend(clips)
 
+            self.performance_metrics["analysis_time"] = time.time() - analysis_start
+
             # [A GUILHOTINA MATEMÁTICA]
             # Força o mínimo de 30s e o teto absoluto de 60s para o YouTube Shorts
             all_clips = self._enforce_duration_limits(
@@ -349,6 +380,8 @@ class VideoProcessorThread(QThread):
             # FASE 3.5: FILTRAGEM DE DUPLICATAS
             # ==========================================
             all_clips = self._remove_duplicate_clips(all_clips)
+            self.performance_metrics["total_clips_found"] = len(all_clips)
+            self.performance_metrics["video_duration"] = max_video_duration
             self.progress_signal.emit(
                 f"Análise concluída. {len(all_clips)} clipes únicos identificados."
             )
@@ -373,8 +406,6 @@ class VideoProcessorThread(QThread):
 
             # Aguarda até que o usuário selecione os clips
             while self.selected_clips is None:
-                import time
-
                 time.sleep(0.5)
 
             # FASE 5: RENDERIZAÇÃO APENAS DOS CLIPES SELECIONADOS
@@ -386,7 +417,13 @@ class VideoProcessorThread(QThread):
             self.progress_signal.emit(
                 f"Iniciando renderização de {len(self.selected_clips)} clipes selecionados..."
             )
+            rendering_start = time.time()
             self._process_video_clips(self.selected_clips)
+
+            self.performance_metrics["rendering_time"] = time.time() - rendering_start
+            self.performance_metrics["clips_selected"] = len(self.selected_clips)
+
+            self._save_processing_history()
 
             self.finished_signal.emit(
                 f"Sucesso! {len(self.selected_clips)} clipes gerados e salvos em:\n{self.output_dir.absolute()}"
@@ -406,6 +443,9 @@ class VideoProcessorThread(QThread):
         """
         base_system = "Você é um Diretor de Edição Sênior especialista em retenção para TikTok e YouTube Shorts. Sua ÚNICA função é extrair blocos de tempo. Retorne APENAS um array JSON puro."
 
+        if self.custom_prompt:
+            return base_system, self.custom_prompt
+
         base_user = f"""
         Analise esta fatiada da transcrição e encontre os momentos mais magnéticos.
 
@@ -413,6 +453,7 @@ class VideoProcessorThread(QThread):
         1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
         2. COERÊNCIA: O clipe deve começar no início exato do raciocínio e terminar na conclusão.
         3. FOCO: Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
+        4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
 
         --- TRANSCRIÇÃO ---
         {text}
@@ -436,6 +477,7 @@ class VideoProcessorThread(QThread):
             1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
             2. COERÊNCIA: O clipe deve começar no início exato da piada ou situação engraçada e terminar na conclusão.
             3. FOCO: Priorize momentos que gerem risadas, situações cômicas, ironia ou humor leve. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
+            4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
 
             --- TRANSCRIÇÃO ---
             {text}
@@ -457,6 +499,7 @@ class VideoProcessorThread(QThread):
             1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
             2. COERÊNCIA: O clipe deve começar no início exato do raciocínio sério e terminar na conclusão valiosa.
             3. FOCO: Priorize momentos que transmitam conhecimento profundo, insights valiosos, conselhos sérios ou conteúdo impactante. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
+            4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
 
             --- TRANSCRIÇÃO ---
             {text}
@@ -478,6 +521,7 @@ class VideoProcessorThread(QThread):
             1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
             2. COERÊNCIA: O clipe deve começar no início exato da história ou emoção e terminar na conclusão emocional.
             3. FOCO: Priorize momentos que contem histórias, gerem emoção, inspiração ou conexão emocional. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
+            4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
 
             --- TRANSCRIÇÃO ---
             {text}
@@ -499,6 +543,7 @@ class VideoProcessorThread(QThread):
             1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
             2. COERÊNCIA: O clipe deve começar no início exato da explicação ou dica e terminar na conclusão prática.
             3. FOCO: Priorize momentos que ensinem algo novo, deem dicas práticas, expliquem conceitos ou forneçam conhecimento útil. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
+            4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
 
             --- TRANSCRIÇÃO ---
             {text}
@@ -600,8 +645,22 @@ class VideoProcessorThread(QThread):
                 "192k",  # Bitrate de áudio de alta fidelidade
                 "-af",
                 "aresample=async=1",  # Mantém a sincronia labial perfeita após o corte
-                str(output_file),
             ]
+
+            # Aplicar resolução se não for 1080p
+            if self.resolution != "1080p":
+                scales = {"720p": "1280:720", "480p": "854:480"}
+                if self.resolution in scales:
+                    cmd.extend(["-vf", f"scale={scales[self.resolution]}"])
+
+            # Aplicar bitrate customizado se fornecido
+            if self.bitrate:
+                if "-crf" in cmd:
+                    idx = cmd.index("-crf")
+                    cmd[idx] = "-b:v"
+                    cmd[idx + 1] = f"{self.bitrate}k"
+
+            cmd.append(str(output_file))
 
             # Executa com check=True e captura saída em caso de falha
             subprocess.run(
@@ -621,6 +680,31 @@ class VideoProcessorThread(QThread):
             self.output_dir / "descricao_e_insights.txt", "w", encoding="utf-8"
         ) as f:
             f.write(desc_content)
+
+    def _save_processing_history(self):
+        """Salva o histórico de processamento em um arquivo JSON."""
+        history_file = Path("processing_history.json")
+        try:
+            if history_file.exists():
+                with open(history_file, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+            else:
+                history = []
+
+            # Adiciona a entrada atual
+            entry = self.performance_metrics.copy()
+            entry["timestamp"] = time.time()
+            entry["video_path"] = self.video_path
+            history.append(entry)
+
+            # Mantém apenas as últimas 50 entradas
+            if len(history) > 50:
+                history = history[-50:]
+
+            with open(history_file, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Erro ao salvar histórico: {e}")
 
 
 class DropZone(QFrame):
@@ -695,6 +779,7 @@ class ClipSelectionDialog(QDialog):
         self.clips = clips
         self.selected_clips = []
         self.checkboxes = []
+        self.edits = []
 
         self.setWindowTitle("Selecione os Clipes para Salvar")
         self.setMinimumWidth(700)
@@ -786,7 +871,25 @@ class ClipSelectionDialog(QDialog):
             lbl_reason.setWordWrap(True)
             clip_layout.addWidget(lbl_reason)
 
+            # Campos de edição
+            lbl_edit_headline = QLabel("Editar Título:")
+            edit_headline = QLineEdit(headline)
+            clip_layout.addWidget(lbl_edit_headline)
+            clip_layout.addWidget(edit_headline)
+
+            lbl_edit_reason = QLabel("Editar Razão:")
+            edit_reason = QLineEdit(reason)
+            clip_layout.addWidget(lbl_edit_reason)
+            clip_layout.addWidget(edit_reason)
+
+            # Botão de pré-visualização
+            btn_preview = QPushButton("Pré-visualizar")
+            btn_preview.clicked.connect(lambda checked, c=clip: self.preview_clip(c))
+            clip_layout.addWidget(btn_preview)
+
             scroll_layout.addWidget(clip_frame)
+
+            self.edits.append((edit_headline, edit_reason))
 
         scroll_area.setWidget(scroll_widget)
         layout.addWidget(scroll_area)
@@ -832,12 +935,39 @@ class ClipSelectionDialog(QDialog):
             checkbox.setChecked(False)
 
     def get_selected_clips(self) -> List[Dict[str, Any]]:
-        """Retorna os clipes selecionados."""
+        """Retorna os clipes selecionados com edições."""
         selected = []
-        for checkbox, clip in self.checkboxes:
+        for i, (checkbox, clip) in enumerate(self.checkboxes):
             if checkbox.isChecked():
-                selected.append(clip)
+                edit_headline, edit_reason = self.edits[i]
+                clip_copy = clip.copy()
+                clip_copy['headline'] = edit_headline.text()
+                clip_copy['reason'] = edit_reason.text()
+                selected.append(clip_copy)
         return selected
+
+    def preview_clip(self, clip):
+        """Mostra uma pré-visualização do clipe tocando o trecho selecionado."""
+        video_path = self.parent().current_video_path if self.parent() else None
+        if not video_path:
+            QMessageBox.warning(self, "Erro", "Vídeo não encontrado.")
+            return
+        
+        start = clip.get("start", 0)
+        end = clip.get("end", 0)
+        duration = end - start
+        
+        # Usa ffplay para tocar apenas o trecho do clipe
+        try:
+            subprocess.Popen([
+                "ffplay",
+                "-ss", str(start),
+                "-t", str(duration),  # -t para duração
+                "-i", video_path,
+                "-window_title", f"Pré-visualização: {clip.get('headline', 'Clipe')}"
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            QMessageBox.warning(self, "Erro", "ffplay não encontrado. Certifique-se de que FFmpeg está instalado e no PATH.")
 
 
 # ==========================================
@@ -997,6 +1127,40 @@ class ViralApp(QMainWindow):
 
         main_layout.addLayout(paths_layout)
 
+        # Configurações Avançadas
+        advanced_group = QGroupBox("Configurações Avançadas")
+        advanced_layout = QVBoxLayout(advanced_group)
+
+        # Resolução
+        lbl_resolution = QLabel("Resolução de Saída:")
+        self.combo_resolution = QComboBox()
+        self.combo_resolution.addItems(["1080p", "720p", "480p"])
+        self.combo_resolution.setCurrentText("1080p")
+        advanced_layout.addWidget(lbl_resolution)
+        advanced_layout.addWidget(self.combo_resolution)
+
+        # Bitrate
+        lbl_bitrate = QLabel("Bitrate de Vídeo (kbps, opcional):")
+        self.edit_bitrate = QLineEdit()
+        self.edit_bitrate.setPlaceholderText("Deixe vazio para CRF 18")
+        advanced_layout.addWidget(lbl_bitrate)
+        advanced_layout.addWidget(self.edit_bitrate)
+
+        # Prompt Customizado
+        lbl_custom_prompt = QLabel("Prompt Customizado (opcional):")
+        self.edit_custom_prompt = QTextEdit()
+        self.edit_custom_prompt.setPlaceholderText("Deixe vazio para usar prompts padrão...")
+        advanced_layout.addWidget(lbl_custom_prompt)
+        advanced_layout.addWidget(self.edit_custom_prompt)
+
+        # Tema
+        self.chk_dark_theme = QCheckBox("Tema Escuro")
+        self.chk_dark_theme.setChecked(True)
+        self.chk_dark_theme.stateChanged.connect(self.toggle_theme)
+        advanced_layout.addWidget(self.chk_dark_theme)
+
+        main_layout.addWidget(advanced_group)
+
         # 4. Drop Zone (Arrastar e Soltar)
         self.drop_zone = DropZone()
         self.drop_zone.setMinimumHeight(80)
@@ -1017,6 +1181,11 @@ class ViralApp(QMainWindow):
 
         main_layout.addWidget(self.progress_bar)
         main_layout.addWidget(self.btn_action)
+
+        # Botão de Relatório
+        self.btn_report = QPushButton("Ver Histórico de Processamento")
+        self.btn_report.clicked.connect(self.show_processing_history)
+        main_layout.addWidget(self.btn_report)
 
         # 6. Terminal / Logs
         lbl_log = QLabel("Terminal de Processamento:")
@@ -1159,6 +1328,9 @@ class ViralApp(QMainWindow):
             model_name=model_selected,
             output_dir=self.output_folder_path,  # Passa a pasta de saída customizada
             prompt_type=self.combo_prompt.currentText(),  # Passa o tipo de prompt selecionado
+            resolution=self.combo_resolution.currentText(),
+            bitrate=self.edit_bitrate.text().strip(),
+            custom_prompt=self.edit_custom_prompt.toPlainText().strip() if self.edit_custom_prompt.toPlainText().strip() else None,
         )
         self.worker.progress_signal.connect(self.update_log)
         self.worker.finished_signal.connect(self.on_finished)
@@ -1254,6 +1426,74 @@ class ViralApp(QMainWindow):
         self.btn_action.setEnabled(False)
 
         self.update_log("[*] Sistema limpo e pronto para um novo vídeo.")
+
+    def toggle_theme(self):
+        if self.chk_dark_theme.isChecked():
+            self._apply_dark_theme()
+        else:
+            self._apply_light_theme()
+
+    def _apply_light_theme(self):
+        self.setStyleSheet(
+            """
+            QMainWindow { background-color: #f0f0f0; }
+            QWidget { color: #000000; font-family: 'Segoe UI', Arial, sans-serif; }
+            QLineEdit {
+                background-color: #ffffff; border: 1px solid #cccccc;
+                border-radius: 4px; padding: 5px 10px; color: #000000;
+            }
+            QLineEdit:focus { border: 1px solid #0078D7; }
+            QComboBox {
+                background-color: #ffffff; border: 1px solid #cccccc;
+                border-radius: 4px; padding: 5px 15px;
+            }
+            QPushButton {
+                background-color: #0078D7; color: white;
+                font-size: 14px; font-weight: bold;
+                border-radius: 6px; border: none;
+            }
+            QPushButton:hover { background-color: #1084ea; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+            QProgressBar {
+                background-color: #cccccc; border-radius: 4px; border: none;
+            }
+            QProgressBar::chunk { background-color: #0078D7; border-radius: 4px; }
+            QTextEdit {
+                background-color: #ffffff; color: #000000;
+                border: 1px solid #cccccc; border-radius: 6px; padding: 10px;
+            }
+            QGroupBox { border: 1px solid #cccccc; border-radius: 4px; margin-top: 10px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px 0 5px; }
+            """
+        )
+
+    def show_processing_history(self):
+        try:
+            history_file = Path("processing_history.json")
+            if not history_file.exists():
+                QMessageBox.information(self, "Histórico", "Nenhum histórico encontrado.")
+                return
+            with open(history_file, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            if not history:
+                QMessageBox.information(self, "Histórico", "Histórico vazio.")
+                return
+            # Mostra as últimas 5 entradas
+            text = "Últimos Processamentos:\n\n"
+            for entry in history[-5:]:
+                text += f"Vídeo: {Path(entry.get('video_path', '')).name}\n"
+                text += f"Duração: {entry.get('video_duration', 0):.1f}s\n"
+                text += f"Clipes Encontrados: {entry.get('total_clips_found', 0)}\n"
+                text += f"Clipes Selecionados: {entry.get('clips_selected', 0)}\n"
+                text += f"Tempo de Transcrição: {entry.get('transcription_time', 0):.1f}s\n"
+                text += f"Tempo de Análise: {entry.get('analysis_time', 0):.1f}s\n"
+                text += f"Tempo de Renderização: {entry.get('rendering_time', 0):.1f}s\n"
+                text += f"Modelo: {entry.get('model_used', '')}\n"
+                text += f"Prompt: {entry.get('prompt_type', '')}\n"
+                text += f"Timestamp: {time.ctime(entry.get('timestamp', 0))}\n\n"
+            QMessageBox.information(self, "Histórico de Processamento", text)
+        except Exception as e:
+            QMessageBox.warning(self, "Erro", f"Erro ao carregar histórico: {e}")
 
 
 if __name__ == "__main__":
