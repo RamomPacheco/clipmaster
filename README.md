@@ -42,7 +42,8 @@ python --version  # Verificar se é 3.10+
 
 1. **Clonar/Entrar no projeto**
 ```powershell
-cd e:\projetos_python\tiktoksele
+git clone https://github.com/RamomPacheco/clipmaster.git
+cd clipmaster
 ```
 
 2. **Criar ambiente virtual (primeira vez)**
@@ -52,13 +53,10 @@ python -m venv .venv
 
 3. **Ativar ambiente virtual**
 ```# 3. Ative o ambiente virtual
-# -> No Windows (PowerShell/CMD):
+Windows (PowerShell/CMD):
 .venv\Scripts\activate
-# -> No Linux/Mac:
+Linux/Mac:
 source .venv/bin/activate
-
-# 4. Instale as dependências rigorosamente mapeadas
-pip install -r requirements.txt
 ```
 
 4. **Instalar dependências**
@@ -93,12 +91,7 @@ A interface gráfica abrirá. Siga os passos:
 
 Os clipes gerados vão para:
 ```
-exports/
-└── SEU_VIDEO_processed/
-    ├── clip_1_viral.mp4
-    ├── clip_2_viral.mp4
-    ├── descricao_e_insights.txt
-    └── ...
+pasta de saída de sua escolha no app
 ```
 
 ---
