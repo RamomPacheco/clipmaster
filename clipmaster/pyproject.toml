@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipmaster"
+version = "0.1.0"
+description = "Aplicação desktop para geração de clipes virais (TikTok / Shorts) com PySide6, Faster-Whisper e Ollama."
+requires-python = ">=3.10"
+readme = "README.md"
+authors = [
+  { name = "Seu Nome", email = "you@example.com" },
+]
+dependencies = [
+  "PySide6>=6.7.0",
+  "faster-whisper>=1.0.0",
+  "ollama>=0.1.0",
+  "pydantic>=2.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "black>=24.0.0",
+  "ruff>=0.6.0",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
