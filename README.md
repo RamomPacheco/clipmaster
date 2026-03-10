@@ -473,3 +473,4 @@ exports/
 5. **Customizar**: Edite os prompts em `llm_analyzer.py` para seu estilo
 
 ---
+### 💙 [Se gostou, considere uma doação ☕](https://livepix.gg/ramompacheco)
