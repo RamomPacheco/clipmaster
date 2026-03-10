@@ -9,7 +9,7 @@
 3. **Renderização com FFmpeg** - Corta e exporta os clipes em MP4 H.264
 
 ---
-
+### 💙 [Se gostou, faça uma doação ☕](https://livepix.gg/ramompacheco)
 ## 🔧 INSTALAÇÃO
 
 ### Pré-requisitos do Sistema
