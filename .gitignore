@@ -57,6 +57,12 @@ pip-delete-this-directory.txt
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
+dist/
+*.egg
+
+# Saída do app (clipes gerados)
+exports/
 
 # =========================
 # JAVA

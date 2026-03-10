@@ -13,4 +13,3 @@ echo [INFO] Iniciando o aplicativo...
 python main.py
 
 echo.
-pause

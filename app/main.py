@@ -85,7 +85,6 @@ class VideoProcessorThread(QThread):
     ) -> List[Dict[str, Any]]:
         """
         Garante que os clipes fiquem entre 30s e 60s.
-        A IA é péssima em matemática, então o Python corrige na força bruta se necessário.
         """
         for i, clip in enumerate(clips):
             start = float(clip.get("start", 0.0))
@@ -859,22 +858,12 @@ class ViralApp(QMainWindow):
         """Busca os modelos disponíveis no Ollama."""
         try:
             import ollama
+
             models = ollama.list()
-            model_list = models.get('models', []) if isinstance(models, dict) else getattr(models, 'models', [])
-            model_names = []
-            for model in model_list:
-                if isinstance(model, dict):
-                    name = model.get('name') or model.get('model')
-                else:
-                    name = getattr(model, 'name', None) or getattr(model, 'model', None)
-                if name:
-                    model_names.append(name)
-                else:
-                    logger.warning(f"Modelo com estrutura inesperada: {model}")
-            return model_names if model_names else ["llama3.2:3b"]
+            return [model["name"] for model in models.get("models", [])]
         except Exception as e:
             logger.warning(f"Erro ao buscar modelos Ollama: {e}")
-            return ["llama3.2:3b"]  # Fallback
+            return ["phi4", "llama3", "mistral"]  # Fallback
 
     def _setup_ui(self):
         central_widget = QWidget()
