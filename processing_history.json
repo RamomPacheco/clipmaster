@@ -1,15 +1,28 @@
 [
   {
-    "start_time": 1773153649.5580494,
-    "transcription_time": 11.566600561141968,
-    "analysis_time": 17.907482862472534,
-    "rendering_time": 24.990829944610596,
+    "start_time": 1773181828.2438455,
+    "transcription_time": 13.16260814666748,
+    "analysis_time": 39.94962430000305,
+    "rendering_time": 24.314820289611816,
     "total_clips_found": 3,
     "clips_selected": 3,
     "video_duration": 171.665125,
     "model_used": "phi4:latest",
     "prompt_type": "Padrão (Equilibrado)",
-    "timestamp": 1773153730.0682287,
-    "video_path": "E:/Downloads/Video/4 estoico.mp4"
+    "timestamp": 1773182319.9625802,
+    "video_path": "E:\\Downloads\\Video\\4 estoico.mp4"
+  },
+  {
+    "start_time": 1773196949.2391968,
+    "transcription_time": 12.161552906036377,
+    "analysis_time": 29.702545166015625,
+    "rendering_time": 23.772866010665894,
+    "total_clips_found": 3,
+    "clips_selected": 3,
+    "video_duration": 171.665125,
+    "model_used": "phi4:latest",
+    "prompt_type": "Padrão (Equilibrado)",
+    "timestamp": 1773197018.4080129,
+    "video_path": "E:\\Downloads\\Video\\4 estoico.mp4"
   }
 ]
