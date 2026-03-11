@@ -1,58 +1,60 @@
-# ClipMaster - Guia Completo
+[![en](https://img.shields.io/badge/lang-English-blue.svg)](README.md)
+[![pt-br](https://img.shields.io/badge/lang-Português-green.svg)](README.pt-BR.md)
+# ClipMaster -Complete Guide
 
-## 📋 O que é?
+## 📋 What is it?
 
-**ClipMaster** é uma aplicação desktop Python que automatiza a geração de clipes virais a partir de vídeos longos. Funciona através de:
+**ClipMaster** is a Python desktop application that automates the generation of viral clips from long videos. It works through:
 
-1. **Transcrição com Faster-Whisper** - Extrai o áudio e converte em texto
-2. **Análise com Ollama (IA Local)** - Lê o texto e identifica os melhores momentos
-3. **Renderização com FFmpeg** - Corta e exporta os clipes em MP4 H.264
+1. **Transcription with Faster-Whisper** -Extract audio and convert to text
+2. **Analysis with Ollama (Local AI)** -Read the text and identify the best moments
+3. **Rendering with FFmpeg** -Cut and export clips in MP4 H.264
 
 ---
-### 💙 [Se gostou, faça uma doação ☕](https://livepix.gg/ramompacheco)
-## 🔧 INSTALAÇÃO
+### 💙 [If you liked it, make a donation ☕](https://livepix.gg/ramompacheco)
+## 🔧 INSTALLATION
 
-### Pré-requisitos do Sistema
+### System Prerequisites
 
 1. **Python 3.10+**
 ```powershell
-python --version  # Verificar se é 3.10+
+python --version # Check if it is 3.10+
 ```
 
-2. **FFmpeg** (obrigatório)
+2. **FFmpeg** (required)
    - Download: https://ffmpeg.org/download.html
-   - Ou por Chocolatey (Windows):
+   - Or by Chocolatey (Windows):
      ```powershell
      choco install ffmpeg
      ```
-   - Verificar:
-     ```powershell
+   - Check:
+```powershell
      ffmpeg -version
      ```
 
 3. **Ollama** (para a IA local)
    - Download: https://ollama.ai
-   - Após instalar, execute no terminal:
+   - After installing, run in the terminal:
      ```powershell
-     ollama pull phi4       # Modelo com melhor resposta 
-     ollama serve           # Rodar o servidor (em outro terminal)
+     ollama pull phi4 # Model with best answer 
+     ollama serves # Run the server (in another terminal)
      ```
 
-### Instalação do Projeto
+### Project Installation
 
-1. **Clonar/Entrar no projeto**
+1. **Clone/Join project**
 ```powershell
 git clone https://github.com/RamomPacheco/clipmaster.git
-cd clipmaster
+clipmaster cd
 ```
 
-2. **Criar ambiente virtual (primeira vez)**
+2. **Create virtual environment (first time)**
 ```powershell
 python -m venv .venv
 ```
 
-3. **Ativar ambiente virtual**
-```# 3. Ative o ambiente virtual
+3. **Activate virtual environment**
+```# 3. Activate the virtual environment
 Windows (PowerShell/CMD):
 .venv\Scripts\activate
 Linux/Mac:
@@ -66,406 +68,410 @@ pip install -r requirements.txt
 
 ---
 
-## ▶️ COMO USAR
+## ▶️ HOW TO USE
 
-### Executar a Aplicação
+### Run the Application
 
 ```powershell
-# A partir da raiz do projeto
+# From the root of the project
 python main.py
 ```
 
-A interface gráfica abrirá. Siga os passos:
+The graphical interface will open. Follow the steps:
 
-1. **Selecionar vídeo** - Clique em "Selecionar Vídeo de Entrada"
-2. **Escolher modelo de IA** - Dropdown de modelos Ollama disponíveis
-3. **Selecionar tipo de análise**:
-   - Padrão (Equilibrado) - Para conteúdo geral
-   - Humor & Comédia - Prioriza momentos engraçados
-   - Sério & Alto Valor - Foca em conteúdo sério/educativo
-4. **Clique em "Iniciar Motor"** - Começa o processamento
-5. **Revisar e selecionar clipes** - Uma janela mostra os clipes encontrados
-6. **Salvar clipes** - Exporte para MP4s em alta qualidade
+1. **Select video** -Click "Select Input Video"
+2. **Choose AI model** -Dropdown of available Ollama templates
+3. **Select analysis type**:
+   - Standard (Balanced) -For general content
+   - Humor & Comedy -Prioritizes funny moments
+   - Serious & High Value -Focuses on serious/educational content
+4. **Click "Start Engine"** -Processing begins
+5. **Review and select clips** -A window shows the found clips
+6. **Save clips** -Export to MP4s in high quality
 
-### Arquivos de Saída
+### Output Files
 
-Os clipes gerados vão para:
+The generated clips go to:
 ```
-pasta de saída de sua escolha no app
+output folder of your choice in the app
 ```
 
 ---
 
-## 📁 ESTRUTURA DO CÓDIGO
+## 📁 CODE STRUCTURE
 
 ```
 clipmaster/
-├── pyproject.toml          # Configuração do projeto
-├── app/
-│   ├── main.py             # Ponto de entrada - cria QApplication
-│   ├── core/
-│   │   ├── config.py       # Constantes e caminhos
-│   │   ├── logger.py       # Sistema de logs
-│   │   └── cuda_setup.py   # Setup de CUDA/DLLs
-│   ├── models/
-│   │   └── schemas.py      # Tipos de dados (Clip, Metrics, etc)
-│   ├── services/
-│   │   ├── transcription.py    # Whisper - converte áudio em texto
-│   │   ├── llm_analyzer.py     # Ollama - análise de conteúdo
-│   │   ├── video_engine.py     # FFmpeg - corte de vídeos
-│   │   └── clip_manager.py     # Gerenciamento de clipes
-│   ├── ui/
-│   │   ├── main_window.py      # Interface principal
-│   │   ├── components/
-│   │   │   └── drop_zone.py    # Zona de arraste para vídeos
-│   │   └── dialogs/
-│   │       └── clip_dialog.py  # Diálogo de seleção de clipes
-│   └── workers/
-│       └── processing_task.py  # Thread de processamento pesado
+├── pyproject.toml # Project configuration
+├──app/
+│ ├── main.py # Entry point -creates QApplication
+│ ├── core/
+│ │ ├── config.py # Constants and paths
+│ │ ├── logger.py # Logging system
+│ │ └── cuda_setup.py # CUDA/DLL setup
+│ ├── models/
+│ │ └── schemas.py # Data types (Clip, Metrics, etc)
+│ ├── services/
+│ │ ├── transcription.py # Whisper -convert audio to text
+│ │ ├── llm_analyzer.py # Ollama -content analysis
+│ │ ├── video_engine.py # FFmpeg -cropping videos
+│ │ └── clip_manager.py # Clip management
+│ ├── ui/
+│ │ ├── main_window.py # Main interface
+│ │ ├── components/
+│ │ │ └── drop_zone.py # Drag zone for videos
+│ │ └── dialogs/
+│ │ └── clip_dialog.py # Clip selection dialog
+│ └── workers/
+│ └── processing_task.py # Heavy processing thread
 ```
 
 ---
 
-## 🔍 EXPLICAÇÃO DAS FUNÇÕES PRINCIPAIS
+## 🔍 EXPLANATION OF MAIN FUNCTIONS
 
-### 1. **core/config.py** - Configurações Globais
+### 1. **core/config.py**-Global Settings
 ```python
-PROJECT_ROOT          # Raiz do projeto
-EXPORTS_ROOT          # Pasta para exportar clipes
-MIN_CLIP_SECONDS      # 30s (duração mínima de um clipe)
-MAX_CLIP_SECONDS      # 60s (máximo para TikTok/Shorts)
-CHUNK_SECONDS         # 600s = 10 minutos (divide vídeo em pedaços)
-DEFAULT_LLM_MODEL     # "llama3.2:3b" (IA padrão)
+PROJECT_ROOT # Project root
+EXPORTS_ROOT # Folder to export clips
+MIN_CLIP_SECONDS #30s (minimum duration of a clip)
+MAX_CLIP_SECONDS #60s (maximum for TikTok/Shorts)
+CHUNK_SECONDS #600s = 10 minutes (splits video into chunks)
+DEFAULT_LLM_MODEL # "llama3.2:3b" (default AI)
 ```
 
-### 2. **core/logger.py** - Sistema de Logs
+### 2. **core/logger.py**-Log System
 ```python
-configure_logging()   # Inicializa logger
-logger.info()         # Mensagens informativas
-logger.warning()      # Avisos
-logger.error()        # Erros
+configure_logging() # Initialize logger
+logger.info() # Informational messages
+logger.warning() # Warnings
+logger.error() # Errors
 ```
 
-### 3. **models/schemas.py** - Estruturas de Dados
+### 3. **models/schemas.py**-Data Structures
 
 #### `Clip`
-Representa um clipe de vídeo:
+Represents a video clip:
 ```python
-class Clip:
-    start: float          # Segundo inicial (ex: 10.5)
-    end: float            # Segundo final (ex: 55.0)
-    reason: str           # Por que é viral? (ex: "Momento engraçado")
-    headline: str         # Título curto do clipe
+classClip:
+    start: float # Start second (ex: 10.5)
+end: float # End second (ex: 55.0)
+    reason: str # Why is it viral? (ex: "Funny moment")
+    headline: str # Short title of the clip
     
     @property
-    def duration:         # Calcula end - start
+    def duration: # Calculate end -start
 ```
 
 #### `ProcessingMetrics`
-Métricas do processamento:
+Processing metrics:
 ```python
-start_time               # Quando começou
-transcription_time       # Quanto levou para transcrever
-analysis_time            # Quanto levou a IA analisar
-rendering_time           # Quanto levou para renderizar
-total_clips_found        # Quantos clipes encontrados
-clips_selected           # Quantos o usuário selecionou
-video_duration           # Duração do vídeo original
-model_used               # Ex: "llama3.2:3b"
-prompt_type              # Ex: "Humor & Comédia"
+start_time # When it started
+transcription_time # How long it took to transcribe
+analysis_time # How long it took the AI to analyze
+rendering_time # How long it took to render
+total_clips_found # How many clips found
+clips_selected # How many the user selected
+video_duration # Duration of the original video
+model used # In: "llama 3.2:3b"
+prompt type # Ex: "Humor and Comedy"
 ```
 
-### 4. **services/transcription.py** - Converter Áudio em Texto
+### 4. **services/transcription.py**-Convert Audio to Text
 
 #### `init_whisper_model()`
-Carrega o modelo de transcrição:
+Load the transcript template:
 ```python
 model = WhisperModel("base", device="cpu", compute_type="int8")
-# device="cpu" → Usa CPU (mais lento, não precisa GPU)
-# compute_type="int8" → Compressão de 8 bits (mais rápido)
+# device="cpu" → Uses CPU (slower, no GPU required)
+# compute_type="int8" → 8-bit compression (fastest)
 ```
 
 #### `transcribe_audio(audio_path) → (segments, duration)`
-Transcreve um arquivo WAV:
-- **Entrada**: Caminho para arquivo WAV
-- **Saída**: Lista de segmentos + duração total
+Transcribes a WAV file:
+- **Entry**: Path to WAV file
+- **Exit**: List of segments + total duration
 ```python
 segments = [
-    {"start": 0.5, "end": 2.3, "text": "Olá, como você está?"},
-    {"start": 2.3, "end": 4.1, "text": "Estou bem, obrigado!"},
+{"start": 0.5, "end": 2.3, "text": "Hello, how are you?"},
+    {"start": 2.3, "end": 4.1, "text": "I'm fine, thanks!"},
     ...
 ]
 ```
 
-### 5. **services/llm_analyzer.py** - Análise com IA
+### 5. **services/llm_analyzer.py**-AI Analysis
 
 #### `build_prompts(prompt_type, text, custom_prompt)`
-Constrói os prompts para a IA:
-- **Padrão**: Equilibrado, para qualquer conteúdo
-- **Humor & Comédia**: Procura por momentos engraçados
-- **Sério & Alto Valor**: Procura por conteúdo educativo/valioso
+Builds the prompts for the AI:
+- **Standard**: Balanced, for any content
+- **Humor & Comedy**: Search for funny moments
+- **Serious & High Value**: Search for educational/valuable content
 
 #### `analyze_viral_potential(text, model, prompt_type)`
-Envia o texto para Ollama e recebe clipes:
+Send text to Ollama and receive clips:
 ```python
-# Input: Transcrição de 10 minutos
-# Output: Lista de clipes com tempos e razões
+# Input: 10 minute transcript
+# Output: List of clips with times and ratios
 [
-    {"start": 15.0, "end": 45.0, "reason": "Piada hilária", "headline": "O melhor momento"},
-    {"start": 120.0, "end": 155.0, "reason": "Conselho valioso", "headline": "Dica importante"},
+{"start": 15.0, "end": 45.0, "reason": "Hilarious joke", "headline": "The best moment"},
+    {"start": 120.0, "end": 155.0, "reason": "Valuable advice", "headline": "Important tip"},
 ]
 ```
 
-### 6. **services/video_engine.py** - Corte e Renderização
+### 6. **services/video_engine.py**-Trimming and Rendering
 
 #### `extract_safe_audio(video_path, output_dir) → audio_path`
-Extrai áudio do vídeo com FFmpeg:
+Extract audio from video with FFmpeg:
 ```python
 # Input: video.mp4
 # Output: temp_audio_safe.wav (mono, 16kHz)
-# Usado para Whisper transcrever
+# Used for Whisper to transcribe
 ffmpeg -i video.mp4 -vn -acodec pcm_s16le -ar 16000 -ac 1 output.wav
 ```
 
 #### `render_clips(video_path, clips, output_dir, resolution, bitrate)`
-Renderiza todos os clipes com H.264:
+Renders all clips with H.264:
 ```python
-# Para cada clipe:
+# For each clip:
 # ffmpeg -i video.mp4 -ss 15.0 -to 45.0 -c:v libx264 -crf 18 clip_1.mp4
 # 
-# Parâmetros:
-# -crf 18 → Qualidade (0=máximo, 51=mínimo, 18=ótimo)
-# -preset slow → Mais tempo, melhor compressão
-# -r 30 → 30 fps (compatível com TikTok/Shorts)
-# -c:a aac → Áudio em AAC (padrão)
+# Parameters:
+# -crf 18 → Quality (0=maximum, 51=minimum, 18=optimal)
+# -preset slow → More time, better compression
+# -r 30 → 30 fps (compatible with TikTok/Shorts)
+# -c:a aac → Audio in AAC (default)
 ```
 
-### 7. **services/clip_manager.py** - Gerenciamento de Clipes
+### 7. **services/clip_manager.py**-Clip Management
 
 #### `enforce_duration_limits(clips, max_video_duration, min, max)`
-Garante que clipes respeitem limites (30-60s):
+Ensures clips respect limits (30-60s):
 ```python
-# Se clipe < 30s → Expande (adiciona segundos antes/depois)
-# Se clipe > 60s → Corta em 60s exatos
+# If clip < 30s → Expand (adds seconds before/after)
+# If clip > 60s → Cut to exact 60s
 ```
 
 #### `remove_duplicate_clips(clips)`
-Remove clipes que se sobrepõem > 50%:
+Removes clips that overlap > 50%:
 ```python
-# Se dois clipes ocupam >50% do mesmo espaço → Remove o com razão menor
+# If two clips occupy >50% of the same space → Remove the one with the smaller ratio
 ```
 
 #### `append_history_entry(metrics, video_path, history_file)`
-Salva histórico de processamentos em JSON:
+Saves processing history in JSON:
 ```json
 [
-  {
+{
     "timestamp": 1234567890.0,
     "video_path": "/path/to/video.mp4",
     "transcription_time": 45.2,
     "analysis_time": 120.5,
-    "rendering_time": 200.0,
+"rendering_time": 200.0,
     "total_clips_found": 8,
     "clips_selected": 5
   }
 ]
 ```
 
-### 8. **workers/processing_task.py** - Orquestração
+### 8. **workers/processing_task.py**-Orchestration
 
-#### `VideoProcessorThread` (herança de QThread)
-Thread que executa o pipeline completo:
+#### `VideoProcessorThread` (inheritance from QThread)
+Thread that runs the complete pipeline:
 
-**Inicialização:**
+**Initialization:**
 ```python
 thread = VideoProcessorThread(
     video_path="/path/video.mp4",
     model_name="llama3.2:3b",
     output_dir="/exports/meu_video_processed",
-    prompt_type="Humor & Comédia",
-    resolution="1080p",
-    bitrate="",           # Vazio = usar CRF 18
-    custom_prompt=None    # None = usar prompt padrão
+prompt type="Humor and Comedy", resolution="1080p", bitrate="", # Empty = use CRF 18 custom_prompt=None # None = use default prompt
 )
+
+
+
 ```
 
-**Sinais emitidos:**
+**Signals emitted:**
 ```python
-progress_signal.emit("Mensagem de progresso")    # Atualiza UI
-finished_signal.emit("Processamento concluído") # Fim
-error_signal.emit("ERRO!")                      # Falha
-clips_ready_signal.emit(lista_de_clips)         # Clipes prontos
+progress_signal.emit("Progress message") # Update UI
+finished_signal.emit("Processing completed") # End
+error_signal.emit("ERROR!") # Failed
+clips_ready_signal.emit(clips_list) # Ready clips
 ```
 
-**Pipeline (função `run`):**
-1. ✅ Verifica se FFmpeg existe
-2. 📦 Extrai áudio do vídeo (FFmpeg)
-3. 📝 Transcreve com Whisper
-4. 🔪 Divide em chunks de 10 minutos
-5. 🤖 Analisa cada chunk com Ollama
-6. 🧹 Remove duplicatas
-7. 📐 Força limites de duração (30-60s)
-8. 💾 Salva histórico
-9. 🎬 Renderiza todos os clipes (FFmpeg)
+**Pipeline (`run` function):**
+1. ✅ Checks if FFmpeg exists
+2. 📦 Extract audio from video (FFmpeg)
+3. 📝 Transcribe with Whisper
+4. 🔪 Divide into 10-minute chunks
+5. 🤖 Analyze each chunk with Ollama
+6. 🧹 Remove duplicates
+7. 📐 Strength duration limits (30-60s)
+8. 💾 Saves history
+9. 🎬 Renders all clips (FFmpeg)
 
-### 9. **ui/main_window.py** - Interface Gráfica
+### 9. **ui/main_window.py**-Graphical Interface
 
-#### `ViralApp` (herança de QMainWindow)
+#### `ViralApp` (inheritance from QMainWindow)
 
-**Métodos principais:**
+**Main methods:**
 
 ```python
-_setup_ui()                    # Constrói a interface
-_apply_dark_theme()           # Aplica tema escuro
-_on_start_engine_clicked()    # Inicia processamento
-_on_save_clips_clicked()      # Salva clipes selecionados
-update_log(message)           # Atualiza a caixa de log
-_get_available_models()       # Lista modelos Ollama instalados
-_load_processing_history()    # Carrega histórico anterior
+_setup_ui() # Build the interface
+_apply_dark_theme() # Apply dark theme
+_on_start_engine_clicked() # Start processing
+_on_save_clips_clicked() # Saves selected clips
+update_log(message) # Update the log box
+_get_available_models() # List installed Ollama models
+_load_processing_history() # Load previous history
 ```
 
-**Sinais conectados:**
+**Connected signals:**
 ```python
-# Quando thread emite, UI se atualiza:
+# When thread emits, UI updates itself:
 thread.progress_signal → update_log()
 thread.clips_ready_signal → show ClipSelectionDialog
 thread.error_signal → show error message
 ```
 
-### 10. **ui/components/drop_zone.py** - Zona de Arraste
+### 10. **ui/components/drop_zone.py**-Zona de Arraste
 
 ```python
 class DropZone(QLabel):
-    file_dropped = Signal(str)  # Emite quando vídeo é arrastado
+file_dropped = Signal(str) # Emits when video is dropped
     
-    # Permite arrastar vídeo diretamente no widget
+    # Allows you to drag video directly into the widget
 ```
 
-### 11. **ui/dialogs/clip_dialog.py** - Seleção de Clipes
+### 11. **ui/dialogs/clip_dialog.py**-Clip Selection
 
 ```python
 class ClipSelectionDialog(QDialog):
-    # Mostra preview dos clipes encontrados
-    # Usuário marca quais deseja salvar
-    # Retorna lista de clipes selectados
+    # Show preview of found clips
+    # User selects which ones they want to save
+    # Returns list of selected clips
 ```
 
 ---
 
-## 🎯 FLUXO COMPLETO
+## 🎯 FULL FLOW
 
 ```
-1️⃣ Usuário abre main.py
+1️⃣ User opens main.py
         ↓
-2️⃣ Interface aparece (ViralApp)
+2️⃣ Interface appears (ViralApp)
+↓
+3️⃣ User selects video + model + type
         ↓
-3️⃣ Usuário seleciona vídeo + modelo + tipo
+4️⃣ Click "Start Engine"
         ↓
-4️⃣ Clica "Iniciar Motor"
+5️⃣ VideoProcessorThread starts:
+        ├─ Extract audio (FFmpeg) → temp_audio.wav
+        ├─ Transcribe (Whisper) → text with timestamps
+        ├─ Divide into 10 min chunks
+        ├─ Send to Ollama (IA)
+├─ Receive clip suggestions
+        ├─ Remove duplicates
+        └─ Forces duration limits
         ↓
-5️⃣ VideoProcessorThread começa:
-        ├─ Extrai áudio (FFmpeg) → temp_audio.wav
-        ├─ Transcreve (Whisper) → texto com timestamps
-        ├─ Divide em 10 min chunks
-        ├─ Envia para Ollama (IA)
-        ├─ Recebe sugestões de clipes
-        ├─ Remove duplicatas
-        └─ Força limites de duração
+6️⃣ Interface shows clips (ClipSelectionDialog)
+↓
+7️⃣ User marks which ones they want to save
         ↓
-6️⃣ Interface mostra clipes (ClipSelectionDialog)
+8️⃣ Renders all marked (FFmpeg)
         ↓
-7️⃣ Usuário marca quais quer salvar
+9️⃣ Saves in exports/VIDEO_processed/
         ↓
-8️⃣ Renderiza todos marcados (FFmpeg)
-        ↓
-9️⃣ Salva em exports/VIDEO_processed/
-        ↓
-🔟 Sucesso! Clipes em MP4 prontos
+🔟 Success! Ready-made MP4 clips
 ```
 
 ---
 
-## ⚙️ CONFIGURAÇÕES IMPORTANTES
+## ⚙️ IMPORTANT SETTINGS
 
-### Limites de Duração (config.py)
+### Duration Limits (config.py)
 ```python
-MIN_CLIP_SECONDS = 30.0  # TikTok/Shorts mínimo
-MAX_CLIP_SECONDS = 60.0  # YouTube Shorts máximo
+MIN_CLIP_SECONDS = 30.0 # Minimum TikTok/Shorts
+MAX_CLIP_SECONDS = 60.0 # YouTube Maximum Shorts
 ```
 
 ### Chunking (config.py)
 ```python
-CHUNK_SECONDS = 600.0  # 10 minutos por chunk
-# Vídeo de 1 hora = 6 requisições para Ollama
-# Vídeo de 2 horas = 12 requisições
-# (Mais chunks = mais análise, mas melhor qualidade)
+CHUNK_SECONDS = 600.0 # 10 minutes per chunk
+# 1 hour video = 6 requests to Ollama
+# 2 hour video = 12 requests
+# (More chunks = more analysis, but better quality)
 ```
 
-### Modelo Default
+### Default model
 ```python
 DEFAULT_LLM_MODEL = "llama3.2:3b"
-# Pode alterar para outros modelos Ollama:
-# - llama2
-# - neural-chat
-# - orca-mini
-# etc
+# You can change to other Ollama models:
+# -llama2
+# -neural-chat
+# -orca-mini
+# etc.
+```
+```python
+BEST_LLM-MODEL = "phi4"
+# for RTX 3060 12gb, ryzen 5 5500
 ```
 
 ---
 
-## 🐛 SOLUÇÃO DE PROBLEMAS
+## 🐛 TROUBLESHOOTING
 
-### Erro: "ModuleNotFoundError: No module named 'app'"
-**Solução**: Execute sempre da **raiz do projeto**:
+### Error: "ModuleNotFoundError: No module named 'app'"
+**Solution**: Always perform **project root**:
 ```powershell
-cd e:\projetos_python\tiktoksele
+cd e:\python_projects\tiktoksele
 python main.py
 ```
 
-### Erro: "ffmpeg not found"
-**Solução**: Instale FFmpeg e adicione ao PATH:
+### Error: "ffmpeg not found"
+**Solution**: Install FFmpeg and add to PATH:
 ```powershell
 choco install ffmpeg
 ```
 
-### Erro: Ollama não conecta
-**Solução**: Certifique-se que Ollama servidor está rodando:
+### Error: Ollama does not connect
+**Solution**: Make sure Ollama server is running:
 ```powershell
-# Em outro terminal:
-ollama serve
+# In another terminal:
+ollama serves
 ```
 
-### Whisper muito lento
-**Motivo**: Usando CPU
-**Solução**: Instale CUDA se tiver GPU NVIDIA
+### Whisper very slow
+**Reason**: Using CPU
+**Solution**: Install CUDA if you have NVIDIA GPU
 
-### Clipes muito ruins
-**Solução**: Teste outros tipos de prompt:
-- Mude em `prompt_type` na UI
-- Ou crie prompt customizado
+### Very bad clips
+**Solution**: Test other prompt types:
+- Change in `prompt_type` in the UI
+- Or create custom prompt
 
 ---
 
-## 📊 EXEMPLO DE SAÍDA
+## 📊 EXAMPLE OUTPUT
 
 ```
 exports/
-└── meu_video_processed/
-    ├── clip_1_viral.mp4         # 45 segundos
-    ├── clip_2_viral.mp4         # 38 segundos
-    ├── clip_3_viral.mp4         # 52 segundos
-    └── descricao_e_insights.txt # Resumo gerado
+└── my_video_processed/
+├── clip_1_viral.mp4 # 45 seconds
+    ├── clip_2_viral.mp4 # 38 seconds
+    ├── clip_3_viral.mp4 # 52 seconds
+    └── description_e_insights.txt # Summary generated
 ```
 
 ---
 
-## 🚀 DICAS PRÁTICAS
+## 🚀 PRACTICAL TIPS
 
-1. **Para melhor qualidade**: Use `-crf 15-18` (mais tempo, melhor)
-2. **Para mais clipes**: Ative "Sério & Alto Valor" (busca mais conteúdo)
-3. **Para vídeos longos**: Use chunks de 10 min para melhor análise
-4. **Histório**: Verifica `processing_history.json` para estatísticas
-5. **Customizar**: Edite os prompts em `llm_analyzer.py` para seu estilo
+1. **For better quality**:Use `-crf 15-18` (longer, better)
+2. **For more clips**: Activate "Serious & High Value" (search for more content)
+3. **For long videos**: Use 10 min chunks for better analysis
+4. **History**: Check `processing_history.json` for statistics
+5. **Customize**: Edit the prompts in `llm_analyzer.py` for your style
 
 ---
-### 💙 [Se gostou, faça uma doação ☕](https://livepix.gg/ramompacheco)
+### 💙 [If you liked it, make a donation ☕](https://livepix.gg/ramompacheco)
