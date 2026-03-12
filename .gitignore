@@ -185,3 +185,6 @@ docker-compose.override.yml
 *.zip
 *.rar
 *.mp4
+*.json
+*workspaces.xml
+*.code-workspace
