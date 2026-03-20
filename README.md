@@ -81,13 +81,14 @@ The graphical interface will open. Follow the steps:
 
 1. **Select video** -Click "Select Input Video"
 2. **Choose AI model** -Dropdown of available Ollama templates
-3. **Select analysis type**:
+3. **Choose transcription model (Whisper)** -Dropdown with `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`
+4. **Select analysis type**:
    - Standard (Balanced) -For general content
    - Humor & Comedy -Prioritizes funny moments
    - Serious & High Value -Focuses on serious/educational content
-4. **Click "Start Engine"** -Processing begins
-5. **Review and select clips** -A window shows the found clips
-6. **Save clips** -Export to MP4s in high quality
+5. **Click "Start Engine"** -Processing begins
+6. **Review and select clips** -A window shows the found clips
+7. **Save clips** -Export to MP4s in high quality
 
 ### Output Files
 
@@ -179,17 +180,10 @@ prompt type # Ex: "Humor and Comedy"
 
 ### 4. **services/transcription.py**-Convert Audio to Text
 
-#### `init_whisper_model()`
-Load the transcript template:
-```python
-model = WhisperModel("base", device="cpu", compute_type="int8")
-# device="cpu" → Uses CPU (slower, no GPU required)
-# compute_type="int8" → 8-bit compression (fastest)
-```
-
-#### `transcribe_audio(audio_path) → (segments, duration)`
+#### `transcribe_audio(audio_path, model_name=None) → (segments, duration)`
 Transcribes a WAV file:
 - **Entry**: Path to WAV file
+- **Optional parameter**: `model_name` (provided by the UI selector)
 - **Exit**: List of segments + total duration
 ```python
 segments = [
@@ -283,6 +277,7 @@ Thread that runs the complete pipeline:
 thread = VideoProcessorThread(
     video_path="/path/video.mp4",
     model_name="llama3.2:3b",
+    whisper_model="small",
     output_dir="/exports/meu_video_processed",
 prompt type="Humor and Comedy", resolution="1080p", bitrate="", # Empty = use CRF 18 custom_prompt=None # None = use default prompt
 )
@@ -411,6 +406,16 @@ DEFAULT_LLM_MODEL = "llama3.2:3b"
 # -neural-chat
 # -orca-mini
 # etc.
+```
+
+### Whisper on CPU by default
+```python
+WHISPER_DEVICE = "cpu"  # default to avoid GPU contention with Ollama
+```
+To force GPU manually:
+```powershell
+$env:WHISPER_DEVICE="cuda"
+python main.py
 ```
 ```python
 BEST_LLM-MODEL = "phi4"

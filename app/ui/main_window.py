@@ -97,6 +97,21 @@ class ViralApp(QMainWindow):
         self.combo_model.setToolTip("Selecione o modelo disponível no Ollama.")
         self.combo_model.setMinimumHeight(30)
 
+        lbl_whisper_model = QLabel("Modelo de Transcrição (Whisper):")
+        lbl_whisper_model.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #dddddd; margin-left: 20px;"
+        )
+
+        self.combo_whisper_model = QComboBox()
+        self.combo_whisper_model.addItems(
+            ["tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"]
+        )
+        self.combo_whisper_model.setCurrentText(config.WHISPER_MODEL)
+        self.combo_whisper_model.setToolTip(
+            "Escolha o modelo do Faster-Whisper para transcrição."
+        )
+        self.combo_whisper_model.setMinimumHeight(30)
+
         lbl_prompt = QLabel("Tipo de Prompt:")
         lbl_prompt.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #dddddd; margin-left: 20px;"
@@ -118,6 +133,8 @@ class ViralApp(QMainWindow):
 
         config_layout.addWidget(lbl_model)
         config_layout.addWidget(self.combo_model)
+        config_layout.addWidget(lbl_whisper_model)
+        config_layout.addWidget(self.combo_whisper_model)
         config_layout.addWidget(lbl_prompt)
         config_layout.addWidget(self.combo_prompt)
         config_layout.addStretch()
@@ -372,11 +389,15 @@ class ViralApp(QMainWindow):
             return
 
         self.update_log(f"[*] Iniciando motor com IA: {model_selected.upper()}")
+        self.update_log(
+            f"[*] Modelo de transcrição selecionado: {self.combo_whisper_model.currentText()}"
+        )
         self.update_log(f"[*] Tipo de prompt selecionado: {self.combo_prompt.currentText()}")
 
         self.btn_action.setEnabled(False)
         self.btn_action.setText("Processando... Aguarde.")
         self.combo_model.setEnabled(False)
+        self.combo_whisper_model.setEnabled(False)
         self.drop_zone.setEnabled(False)
 
         self.progress_bar.setProperty("state", "normal")
@@ -387,6 +408,7 @@ class ViralApp(QMainWindow):
             model_name=model_selected,
             output_dir=self.output_folder_path,
             prompt_type=self.combo_prompt.currentText(),
+            whisper_model=self.combo_whisper_model.currentText(),
             resolution=self.combo_resolution.currentText(),
             bitrate=self.edit_bitrate.text().strip(),
             custom_prompt=(
@@ -446,6 +468,7 @@ class ViralApp(QMainWindow):
     def _unlock_ui_after_process(self) -> None:
         self.btn_action.setEnabled(True)
         self.combo_model.setEnabled(True)
+        self.combo_whisper_model.setEnabled(True)
         self.drop_zone.setEnabled(True)
 
     def reset_ui_for_new_video(self) -> None:

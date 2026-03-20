@@ -9,6 +9,14 @@ import ollama
 from app.core.config import DEFAULT_LLM_MODEL
 from app.core.logger import logger
 
+# Reforça alinhamento aos timestamps reais do Whisper (reduz alucinação de segundos).
+_TIMESTAMP_RULE = """
+    REGRA DE TIMESTAMPS (OBRIGATÓRIA): Os valores de "start" e "end" DEVEM ser tempos que
+    apareçam explicitamente nas linhas "[início - fim]" desta transcrição (use o número de
+    início de uma linha para começar o clipe e o número de fim de uma linha para terminar,
+    cobrindo uma ou várias linhas inteiras). Não invente segundos que não existam no texto.
+"""
+
 
 def _base_system_prompt() -> str:
     return (
@@ -25,7 +33,11 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
     base_system = _base_system_prompt()
 
     if custom_prompt:
-        return base_system, custom_prompt
+        hint = (
+            "\n\n(Obrigatório: use apenas tempos de início/fim que existam nas linhas "
+            "\"[x - y]\" da transcrição; não invente segundos fora desse texto.)"
+        )
+        return base_system, custom_prompt + hint
 
     base_user = f"""
     Analise esta fatiada da transcrição e encontre os momentos mais magnéticos.
@@ -35,7 +47,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
     2. COERÊNCIA: O clipe deve começar no início exato do raciocínio e terminar na conclusão.
     3. FOCO: Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
     4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
-
+{_TIMESTAMP_RULE}
     --- TRANSCRIÇÃO ---
     {text}
     --- FIM DA TRANSCRIÇÃO ---
@@ -63,7 +75,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         2. COERÊNCIA: O clipe deve começar no início exato da piada ou situação engraçada e terminar na conclusão.
         3. FOCO: Priorize momentos que gerem risadas, situações cômicas, ironia ou humor leve. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
-
+{_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
         --- FIM DA TRANSCRIÇÃO ---
@@ -89,7 +101,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         2. COERÊNCIA: O clipe deve começar no início exato do raciocínio sério e terminar na conclusão valiosa.
         3. FOCO: Priorize momentos que transmitam conhecimento profundo, insights valiosos, conselhos sérios ou conteúdo impactante. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
-
+{_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
         --- FIM DA TRANSCRIÇÃO ---
@@ -115,7 +127,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         2. COERÊNCIA: O clipe deve começar no início exato da história ou emoção e terminar na conclusão emocional.
         3. FOCO: Priorize momentos que contem histórias, gerem emoção, inspiração ou conexão emocional. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
-
+{_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
         --- FIM DA TRANSCRIÇÃO ---
@@ -141,7 +153,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         2. COERÊNCIA: O clipe deve começar no início exato da explicação ou dica e terminar na conclusão prática.
         3. FOCO: Priorize momentos que ensinem algo novo, deem dicas práticas, expliquem conceitos ou forneçam conhecimento útil. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
-
+{_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
         --- FIM DA TRANSCRIÇÃO ---
@@ -177,7 +189,7 @@ def analyze_viral_potential(
             ],
             format="json",
             options={
-                "num_ctx": 8192,
+                "num_ctx": 2048,
                 "temperature": 0.1,
                 "top_p": 0.9,
             },

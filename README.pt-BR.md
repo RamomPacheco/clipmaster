@@ -83,13 +83,14 @@ A interface gráfica abrirá. Siga os passos:
 
 1. **Selecionar vídeo** - Clique em "Selecionar Vídeo de Entrada"
 2. **Escolher modelo de IA** - Dropdown de modelos Ollama disponíveis
-3. **Selecionar tipo de análise**:
+3. **Escolher modelo de transcrição (Whisper)** - Dropdown com `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`
+4. **Selecionar tipo de análise**:
    - Padrão (Equilibrado) - Para conteúdo geral
    - Humor & Comédia - Prioriza momentos engraçados
    - Sério & Alto Valor - Foca em conteúdo sério/educativo
-4. **Clique em "Iniciar Motor"** - Começa o processamento
-5. **Revisar e selecionar clipes** - Uma janela mostra os clipes encontrados
-6. **Salvar clipes** - Exporte para MP4s em alta qualidade
+5. **Clique em "Iniciar Motor"** - Começa o processamento
+6. **Revisar e selecionar clipes** - Uma janela mostra os clipes encontrados
+7. **Salvar clipes** - Exporte para MP4s em alta qualidade
 
 ### Arquivos de Saída
 
@@ -181,17 +182,10 @@ prompt_type              # Ex: "Humor & Comédia"
 
 ### 4. **services/transcription.py** - Converter Áudio em Texto
 
-#### `init_whisper_model()`
-Carrega o modelo de transcrição:
-```python
-model = WhisperModel("base", device="cpu", compute_type="int8")
-# device="cpu" → Usa CPU (mais lento, não precisa GPU)
-# compute_type="int8" → Compressão de 8 bits (mais rápido)
-```
-
-#### `transcribe_audio(audio_path) → (segments, duration)`
+#### `transcribe_audio(audio_path, model_name=None) → (segments, duration)`
 Transcreve um arquivo WAV:
 - **Entrada**: Caminho para arquivo WAV
+- **Parâmetro opcional**: `model_name` (vem do seletor da interface)
 - **Saída**: Lista de segmentos + duração total
 ```python
 segments = [
@@ -285,6 +279,7 @@ Thread que executa o pipeline completo:
 thread = VideoProcessorThread(
     video_path="/path/video.mp4",
     model_name="llama3.2:3b",
+    whisper_model="small",
     output_dir="/exports/meu_video_processed",
     prompt_type="Humor & Comédia",
     resolution="1080p",
@@ -415,6 +410,16 @@ DEFAULT_LLM_MODEL = "llama3.2:3b"
 # etc
 ```
 
+### Whisper no processador (CPU por padrão)
+```python
+WHISPER_DEVICE = "cpu"  # padrão atual para evitar disputa com Ollama na GPU
+```
+Para usar GPU manualmente:
+```powershell
+$env:WHISPER_DEVICE="cuda"
+python main.py
+```
+
 ---
 
 ## 🐛 SOLUÇÃO DE PROBLEMAS
@@ -438,6 +443,18 @@ choco install ffmpeg
 # Em outro terminal:
 ollama serve
 ```
+
+### Transcrição trava ou falha no fim do vídeo (GPU / CUDA)
+Com **Ollama** e **Faster-Whisper** na **mesma GPU**, a VRAM pode acabar no último trecho do áudio (OOM). O app tenta repetir em **CPU** automaticamente; para evitar a falha desde o início:
+
+```powershell
+# Antes de abrir o app — só Whisper em CPU (Ollama continua na GPU):
+$env:WHISPER_SHARED_GPU_SAFE="1"
+python main.py
+```
+
+Outras opções: `WHISPER_DEVICE=cpu`, ou `WHISPER_CUDA_LOW_VRAM=1` (mantém CUDA com menos VRAM).  
+`WHISPER_COMPUTE_TYPE` continua podendo ser definido manualmente (ex.: `int8_float16`).
 
 ### Whisper muito lento
 **Motivo**: Usando CPU

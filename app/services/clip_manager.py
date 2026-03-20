@@ -3,11 +3,167 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Iterable, List
+from typing import Any, Dict, Iterable, List
 
 from app.core import config
 from app.core.logger import logger
 from app.models.schemas import Clip, ProcessingHistoryEntry, ProcessingMetrics
+
+
+def build_overlapping_chapters(
+    segments: List[Dict[str, Any]],
+    chunk_seconds: float,
+    overlap_seconds: float,
+) -> List[List[Dict[str, Any]]]:
+    """
+    Divide a transcrição em blocos de até `chunk_seconds`, com cauda sobreposta
+    para o próximo bloco não começar “do zero” no meio de uma ideia.
+    """
+    if not segments:
+        return []
+    chapters: List[List[Dict[str, Any]]] = []
+    current_chunk: List[Dict[str, Any]] = []
+    chunk_start = float(segments[0]["start"])
+
+    for s in segments:
+        if current_chunk and s["end"] - chunk_start > chunk_seconds:
+            chapters.append(current_chunk)
+            overlap_start = max(chunk_start, current_chunk[-1]["end"] - overlap_seconds)
+            tail = [seg for seg in current_chunk if seg["end"] > overlap_start]
+            current_chunk = tail + [s]
+            chunk_start = min(float(x["start"]) for x in current_chunk)
+        else:
+            current_chunk.append(s)
+
+    if current_chunk:
+        chapters.append(current_chunk)
+    return chapters
+
+
+def _flatten_words(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    words: List[Dict[str, Any]] = []
+    for s in segments:
+        for w in s.get("words") or []:
+            words.append(w)
+    words.sort(key=lambda w: float(w["start"]))
+    return words
+
+
+def _snap_start_to_words(t: float, words: List[Dict[str, Any]]) -> float:
+    if not words:
+        return t
+    for w in words:
+        if w["start"] <= t <= w["end"]:
+            return float(w["start"])
+    for w in words:
+        if t < w["start"]:
+            return float(w["start"])
+    return float(words[-1]["start"])
+
+
+def _snap_end_to_words(t: float, words: List[Dict[str, Any]]) -> float:
+    if not words:
+        return t
+    for w in words:
+        if w["start"] <= t <= w["end"]:
+            return float(w["end"])
+    for w in reversed(words):
+        if t >= w["end"]:
+            return float(w["end"])
+    return float(words[-1]["end"])
+
+
+def _snap_start_to_segments(t: float, segs: List[Dict[str, Any]]) -> float:
+    if not segs:
+        return max(0.0, t)
+    ordered = sorted(segs, key=lambda s: float(s["start"]))
+    if t <= ordered[0]["start"]:
+        return float(ordered[0]["start"])
+    if t >= ordered[-1]["end"]:
+        return float(ordered[-1]["start"])
+    for s in ordered:
+        if s["start"] <= t <= s["end"]:
+            return float(s["start"])
+    for i in range(len(ordered) - 1):
+        if ordered[i]["end"] < t < ordered[i + 1]["start"]:
+            return float(ordered[i + 1]["start"])
+    return float(t)
+
+
+def _snap_end_to_segments(t: float, segs: List[Dict[str, Any]]) -> float:
+    if not segs:
+        return t
+    ordered = sorted(segs, key=lambda s: float(s["start"]))
+    if t <= ordered[0]["start"]:
+        return float(ordered[0]["end"])
+    if t >= ordered[-1]["end"]:
+        return float(ordered[-1]["end"])
+    for s in ordered:
+        if s["start"] <= t <= s["end"]:
+            return float(s["end"])
+    for i in range(len(ordered) - 1):
+        if ordered[i]["end"] < t < ordered[i + 1]["start"]:
+            return float(ordered[i]["end"])
+    return float(t)
+
+
+def snap_clip_to_transcript(
+    clip: Clip,
+    segments: List[Dict[str, Any]],
+) -> Clip:
+    """Alinha início/fim do clipe aos limites de palavra (ou segmento) da transcrição."""
+    if not segments:
+        return clip
+
+    words = _flatten_words(segments)
+    if len(words) >= 2:
+        start = _snap_start_to_words(float(clip.start), words)
+        end = _snap_end_to_words(float(clip.end), words)
+    else:
+        start = _snap_start_to_segments(float(clip.start), segments)
+        end = _snap_end_to_segments(float(clip.end), segments)
+
+    max_end = float(segments[-1]["end"])
+    start = max(0.0, min(start, max_end))
+    end = max(start + 0.25, min(end, max_end))
+
+    return clip.model_copy(
+        update={
+            "start": round(start, 2),
+            "end": round(end, 2),
+        }
+    )
+
+
+def snap_clips_to_transcript(
+    clips: Iterable[Clip],
+    segments: List[Dict[str, Any]],
+) -> List[Clip]:
+    return [snap_clip_to_transcript(c, segments) for c in clips]
+
+
+def filter_valid_clips(
+    clips: Iterable[Clip],
+    max_video_duration: float,
+    min_duration: float = 1.0,
+) -> List[Clip]:
+    """Remove clipes inválidos ou fora do vídeo."""
+    out: List[Clip] = []
+    for c in clips:
+        start = float(c.start)
+        end = float(c.end)
+        if start < 0 or end <= start:
+            logger.info("Clipe descartado: intervalo inválido (%.2f–%.2f)", start, end)
+            continue
+        if start >= max_video_duration:
+            logger.info("Clipe descartado: início após o fim do vídeo")
+            continue
+        end = min(end, max_video_duration)
+        if end - start < min_duration:
+            logger.info("Clipe descartado: duração muito curta (%.2fs)", end - start)
+            continue
+        out.append(c.model_copy(update={"start": round(start, 2), "end": round(end, 2)}))
+    return out
 
 
 def enforce_duration_limits(

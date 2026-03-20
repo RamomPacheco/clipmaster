@@ -12,8 +12,11 @@ from app.core.logger import logger
 from app.models.schemas import Clip, ClipList, ProcessingMetrics
 from app.services.clip_manager import (
     append_history_entry,
+    build_overlapping_chapters,
     enforce_duration_limits,
+    filter_valid_clips,
     remove_duplicate_clips,
+    snap_clips_to_transcript,
 )
 from app.services.llm_analyzer import analyze_viral_potential
 from app.services.transcription import transcribe_audio
@@ -37,6 +40,7 @@ class VideoProcessorThread(QThread):
         model_name: str,
         output_dir: Optional[str] = None,
         prompt_type: str = "Padrão (Equilibrado)",
+        whisper_model: str | None = None,
         resolution: str = "1080p",
         bitrate: str = "",
         custom_prompt: Optional[str] = None,
@@ -50,6 +54,7 @@ class VideoProcessorThread(QThread):
             else config.EXPORTS_ROOT / f"{self.video_path.stem}_processed"
         )
         self.prompt_type = prompt_type
+        self.whisper_model = whisper_model
         self.selected_clips: Optional[ClipList] = None
         self.resolution = resolution
         self.bitrate = bitrate
@@ -83,11 +88,13 @@ class VideoProcessorThread(QThread):
             self.output_dir.mkdir(parents=True, exist_ok=True)
 
             # Fase 0 - extração de áudio
-            self.progress_signal.emit("Preparando arquivo de áudio leve (FFmpeg)...")
+            self.progress_signal.emit("Preparando arquivo de áudio (FFmpeg)...")
             temp_audio_path = extract_safe_audio(self.video_path, self.output_dir)
 
             # Fase 1 - transcrição
-            segments, max_video_duration = transcribe_audio(temp_audio_path)
+            segments, max_video_duration = transcribe_audio(
+                temp_audio_path, model_name=self.whisper_model
+            )
             self.metrics.transcription_time = time.time() - self.metrics.start_time
 
             # Remove áudio temporário
@@ -104,22 +111,13 @@ class VideoProcessorThread(QThread):
 
             gc.collect()
 
-            # Fase 2 - chunking em 10 minutos
+            # Fase 2 - chunking com sobreposição (evita cortar ideias na junção de blocos)
             analysis_start = time.time()
-            chapters: List[list[dict]] = []
-            current_chunk: list[dict] = []
-            chunk_start = 0.0
-
-            for s in segments:
-                if s["end"] - chunk_start > config.CHUNK_SECONDS and current_chunk:
-                    chapters.append(current_chunk)
-                    current_chunk = [s]
-                    chunk_start = s["start"]
-                else:
-                    current_chunk.append(s)
-
-            if current_chunk:
-                chapters.append(current_chunk)
+            chapters = build_overlapping_chapters(
+                segments,
+                config.CHUNK_SECONDS,
+                config.CHUNK_OVERLAP_SECONDS,
+            )
 
             # Fase 3 - análise via LLM
             all_clips: List[Clip] = []
@@ -156,7 +154,25 @@ class VideoProcessorThread(QThread):
 
             self.metrics.analysis_time = time.time() - analysis_start
 
-            # Fase 3.5 - ajustar duração e remover duplicatas
+            # Fase 3.5 - alinhar aos limites da transcrição e ajustar duração
+            all_clips = filter_valid_clips(
+                all_clips,
+                max_video_duration=max_video_duration,
+                min_duration=0.5,
+            )
+            all_clips = snap_clips_to_transcript(all_clips, segments)
+            all_clips = filter_valid_clips(
+                all_clips,
+                max_video_duration=max_video_duration,
+                min_duration=0.5,
+            )
+            all_clips = enforce_duration_limits(
+                all_clips,
+                max_video_duration=max_video_duration,
+                min_seconds=config.MIN_CLIP_SECONDS,
+                max_seconds=config.MAX_CLIP_SECONDS,
+            )
+            all_clips = snap_clips_to_transcript(all_clips, segments)
             all_clips = enforce_duration_limits(
                 all_clips,
                 max_video_duration=max_video_duration,
