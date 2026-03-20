@@ -1,5 +1,8 @@
 from __future__ import annotations
+
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 from typing import List
@@ -45,6 +48,56 @@ class ViralApp(QMainWindow):
         self._apply_dark_theme()
 
     # ---------------- UI Setup ----------------
+    def _get_gemini_models(self) -> List[str]:
+        api_key = self.edit_api_key.text().strip() if hasattr(self, "edit_api_key") else ""
+        if not api_key:
+            return ["gemini-2.5-flash"]
+        try:
+            import google.generativeai as genai
+
+            genai.configure(api_key=api_key)
+            discovered: List[str] = []
+            for model in genai.list_models():
+                methods = getattr(model, "supported_generation_methods", []) or []
+                if "generateContent" not in methods:
+                    continue
+                name = str(getattr(model, "name", "")).strip()
+                if not name:
+                    continue
+                discovered.append(name.removeprefix("models/"))
+
+            if discovered:
+                # Remove duplicados preservando ordem
+                return list(dict.fromkeys(discovered))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Não foi possível listar modelos Gemini via API: %s", e)
+
+        return ["gemini-2.5-flash"]
+
+    def _current_llm_provider(self) -> str:
+        text = self.combo_provider.currentText().strip().lower()
+        if "gemini" in text:
+            return "gemini"
+        return "ollama"
+
+    def _sync_llm_model_options(self) -> None:
+        provider = self._current_llm_provider()
+        self.combo_model.clear()
+        if provider == "gemini":
+            self.lbl_model.setText("Modelo de IA (Gemini API):")
+            self.combo_model.addItems(self._get_gemini_models())
+            self.combo_model.setToolTip("Selecione o modelo para uso via API Gemini.")
+            if "gemini-2.5-flash" in self._get_gemini_models():
+                self.combo_model.setCurrentText("gemini-2.5-flash")
+        else:
+            self.lbl_model.setText("Modelo de IA (Ollama Local):")
+            self.combo_model.addItems(self._get_available_models())
+            self.combo_model.setToolTip("Selecione o modelo disponível no Ollama local.")
+
+    def _on_provider_changed(self) -> None:
+        self._sync_llm_model_options()
+        self.edit_api_key.setEnabled(self._current_llm_provider() == "gemini")
+
     def _get_available_models(self) -> List[str]:
         try:
             import ollama
@@ -70,6 +123,61 @@ class ViralApp(QMainWindow):
             logger.warning("Erro ao buscar modelos Ollama: %s", e)
             return [config.DEFAULT_LLM_MODEL]
 
+    def _get_video_height(self, file_path: str) -> int | None:
+        """Retorna a altura do vídeo via ffprobe (ex.: 1080, 2160)."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=height",
+                    "-of",
+                    "csv=p=0",
+                    file_path,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+            out = result.stdout.strip()
+            return int(out) if out.isdigit() else None
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Não foi possível detectar resolução do vídeo: %s", e)
+            return None
+
+    def _update_resolution_options_for_video(self, file_path: str) -> None:
+        """
+        Ajusta opções de saída com base na resolução do vídeo importado.
+        Ex.: vídeo 1440p mostra até 2K.
+        """
+        all_options = [
+            ("SD (720p)", 720),
+            ("HD (1080p)", 1080),
+            ("2K (1440p)", 1440),
+            ("4K (2160p)", 2160),
+        ]
+        video_h = self._get_video_height(file_path)
+        selected_before = self.combo_resolution.currentText()
+        self.combo_resolution.clear()
+
+        if video_h is None:
+            self.combo_resolution.addItems([label for label, _ in all_options])
+        else:
+            allowed = [label for label, h in all_options if h <= video_h]
+            if not allowed:
+                allowed = [all_options[0][0]]
+            self.combo_resolution.addItems(allowed)
+
+        if selected_before in [self.combo_resolution.itemText(i) for i in range(self.combo_resolution.count())]:
+            self.combo_resolution.setCurrentText(selected_before)
+        else:
+            self.combo_resolution.setCurrentIndex(self.combo_resolution.count() - 1)
+
     def _setup_ui(self) -> None:
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -87,13 +195,34 @@ class ViralApp(QMainWindow):
 
         # Configuração de modelo e prompt
         config_layout = QHBoxLayout()
-        lbl_model = QLabel("Modelo de IA (Ollama):")
-        lbl_model.setStyleSheet("font-size: 14px; font-weight: bold; color: #dddddd;")
+        lbl_provider = QLabel("Provedor de IA:")
+        lbl_provider.setStyleSheet("font-size: 14px; font-weight: bold; color: #dddddd;")
+
+        self.combo_provider = QComboBox()
+        self.combo_provider.addItems(["Local (Ollama)", "API (Gemini)"])
+        self.combo_provider.setCurrentText("Local (Ollama)")
+        self.combo_provider.setMinimumHeight(30)
+        self.combo_provider.currentTextChanged.connect(self._on_provider_changed)
+
+        self.lbl_model = QLabel("Modelo de IA (Ollama Local):")
+        self.lbl_model.setStyleSheet("font-size: 14px; font-weight: bold; color: #dddddd;")
 
         self.combo_model = QComboBox()
         self.combo_model.addItems(self._get_available_models())
-        self.combo_model.setToolTip("Selecione o modelo disponível no Ollama.")
+        self.combo_model.setToolTip("Selecione o modelo disponível no Ollama local.")
         self.combo_model.setMinimumHeight(30)
+
+        lbl_api_key = QLabel("Gemini API Key:")
+        lbl_api_key.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #dddddd; margin-left: 20px;"
+        )
+        self.edit_api_key = QLineEdit()
+        self.edit_api_key.setEchoMode(QLineEdit.Password)
+        self.edit_api_key.setPlaceholderText("Cole sua GOOGLE_API_KEY")
+        self.edit_api_key.setToolTip("Usada quando o provedor for API (Gemini).")
+        self.edit_api_key.setMinimumHeight(30)
+        self.edit_api_key.setEnabled(False)
+        self.edit_api_key.textChanged.connect(lambda _t: self._sync_llm_model_options())
 
         lbl_whisper_model = QLabel("Modelo de Transcrição (Whisper):")
         lbl_whisper_model.setStyleSheet(
@@ -109,6 +238,20 @@ class ViralApp(QMainWindow):
             "Escolha o modelo do Faster-Whisper para transcrição."
         )
         self.combo_whisper_model.setMinimumHeight(30)
+
+        lbl_whisper_device = QLabel("Whisper Device:")
+        lbl_whisper_device.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #dddddd; margin-left: 20px;"
+        )
+        self.combo_whisper_device = QComboBox()
+        self.combo_whisper_device.addItems(
+            ["Auto (recomendado)", "CPU (estável)", "GPU CUDA (rápido)"]
+        )
+        self.combo_whisper_device.setCurrentText("Auto (recomendado)")
+        self.combo_whisper_device.setToolTip(
+            "Define onde o Faster-Whisper roda. CPU é mais estável, GPU é mais rápida."
+        )
+        self.combo_whisper_device.setMinimumHeight(30)
 
         lbl_prompt = QLabel("Tipo de Prompt:")
         lbl_prompt.setStyleSheet(
@@ -129,14 +272,22 @@ class ViralApp(QMainWindow):
         self.combo_prompt.setMinimumHeight(30)
         self.combo_prompt.setCurrentText("Padrão (Equilibrado)")
 
-        config_layout.addWidget(lbl_model)
+        config_layout.addWidget(lbl_provider)
+        config_layout.addWidget(self.combo_provider)
+        config_layout.addWidget(self.lbl_model)
         config_layout.addWidget(self.combo_model)
+        config_layout.addWidget(lbl_api_key)
+        config_layout.addWidget(self.edit_api_key)
         config_layout.addWidget(lbl_whisper_model)
         config_layout.addWidget(self.combo_whisper_model)
+        config_layout.addWidget(lbl_whisper_device)
+        config_layout.addWidget(self.combo_whisper_device)
         config_layout.addWidget(lbl_prompt)
         config_layout.addWidget(self.combo_prompt)
         config_layout.addStretch()
         main_layout.addLayout(config_layout)
+
+        self._sync_llm_model_options()
 
         # Caminhos
         paths_layout = QVBoxLayout()
@@ -202,12 +353,36 @@ class ViralApp(QMainWindow):
         advanced_group = QGroupBox("Configurações Avançadas")
         advanced_layout = QVBoxLayout(advanced_group)
 
-        lbl_resolution = QLabel("Resolução de Saída:")
+        lbl_resolution = QLabel("Qualidade (Resolução):")
         self.combo_resolution = QComboBox()
-        self.combo_resolution.addItems(["1080p", "720p", "480p"])
-        self.combo_resolution.setCurrentText("1080p")
+        self.combo_resolution.addItems(
+            ["SD (720p)", "HD (1080p)", "2K (1440p)", "4K (2160p)"]
+        )
+        self.combo_resolution.setCurrentText("HD (1080p)")
         advanced_layout.addWidget(lbl_resolution)
         advanced_layout.addWidget(self.combo_resolution)
+
+        lbl_aspect = QLabel("Formato do Vídeo:")
+        self.combo_aspect_ratio = QComboBox()
+        self.combo_aspect_ratio.addItems(
+            ["Vertical (9:16) - Redes sociais", "Horizontal (16:9)"]
+        )
+        self.combo_aspect_ratio.setCurrentText("Vertical (9:16) - Redes sociais")
+        advanced_layout.addWidget(lbl_aspect)
+        advanced_layout.addWidget(self.combo_aspect_ratio)
+
+        lbl_framing = QLabel("Enquadramento:")
+        self.combo_framing_mode = QComboBox()
+        self.combo_framing_mode.addItems(
+            [
+                "Manter conteúdo (com bordas)",
+                "Preencher tela (crop)",
+                "Crop inteligente (rosto)",
+            ]
+        )
+        self.combo_framing_mode.setCurrentText("Manter conteúdo (com bordas)")
+        advanced_layout.addWidget(lbl_framing)
+        advanced_layout.addWidget(self.combo_framing_mode)
 
         lbl_bitrate = QLabel("Bitrate de Vídeo (kbps, opcional):")
         self.edit_bitrate = QLineEdit()
@@ -225,6 +400,20 @@ class ViralApp(QMainWindow):
         self.chk_dark_theme.setChecked(True)
         self.chk_dark_theme.stateChanged.connect(self.toggle_theme)
         advanced_layout.addWidget(self.chk_dark_theme)
+
+        self.chk_tiktok_captions = QCheckBox("Legendas Interativas (estilo TikTok)")
+        self.chk_tiktok_captions.setChecked(False)
+        self.chk_tiktok_captions.setToolTip(
+            "Gera legenda dinâmica com destaque por palavra usando os timestamps do Whisper."
+        )
+        advanced_layout.addWidget(self.chk_tiktok_captions)
+
+        self.chk_skip_preview = QCheckBox("Renderizar sem pré-visualização")
+        self.chk_skip_preview.setChecked(False)
+        self.chk_skip_preview.setToolTip(
+            "Quando ativado, renderiza todos os clipes encontrados sem abrir a seleção manual."
+        )
+        advanced_layout.addWidget(self.chk_skip_preview)
 
         main_layout.addWidget(advanced_group)
 
@@ -344,6 +533,7 @@ class ViralApp(QMainWindow):
         self.log_output.clear()
         self.update_log(f"[*] VÍDEO CARREGADO: {file_path}")
         self.drop_zone.lbl_text.setText(f"🎥 {Path(file_path).name}\n(Clique para trocar)")
+        self._update_resolution_options_for_video(file_path)
 
         self.btn_action.setText("Iniciar Processamento Viral")
         self.btn_action.setStyleSheet("")
@@ -378,23 +568,43 @@ class ViralApp(QMainWindow):
             return
 
         model_selected = self.combo_model.currentText()
-        available_models = self._get_available_models()
-        if model_selected not in available_models:
-            self.update_log(f"[!] ERRO: Modelo '{model_selected}' não encontrado no Ollama.")
-            self.update_log(f"[!] Modelos disponíveis: {', '.join(available_models)}")
-            self._unlock_ui_after_process()
-            self.btn_action.setText("Selecionar Modelo Válido")
-            return
+        provider_selected = self._current_llm_provider()
+        if provider_selected == "ollama":
+            available_models = self._get_available_models()
+            if model_selected not in available_models:
+                self.update_log(f"[!] ERRO: Modelo '{model_selected}' não encontrado no Ollama.")
+                self.update_log(f"[!] Modelos disponíveis: {', '.join(available_models)}")
+                self._unlock_ui_after_process()
+                self.btn_action.setText("Selecionar Modelo Válido")
+                return
 
+        self.update_log(f"[*] Provedor selecionado: {provider_selected.upper()}")
         self.update_log(f"[*] Iniciando motor com IA: {model_selected.upper()}")
+        if provider_selected == "gemini" and not self.edit_api_key.text().strip():
+            self.update_log("[!] ERRO: Informe a Gemini API Key para usar provedor API.")
+            self._unlock_ui_after_process()
+            self.btn_action.setText("Informar API Key")
+            return
         self.update_log(
             f"[*] Modelo de transcrição selecionado: {self.combo_whisper_model.currentText()}"
         )
+        self.update_log(f"[*] Whisper device: {self.combo_whisper_device.currentText()}")
         self.update_log(f"[*] Tipo de prompt selecionado: {self.combo_prompt.currentText()}")
+        self.update_log(f"[*] Qualidade (resolução): {self.combo_resolution.currentText()}")
+        self.update_log(f"[*] Formato: {self.combo_aspect_ratio.currentText()}")
+        self.update_log(f"[*] Enquadramento: {self.combo_framing_mode.currentText()}")
+        self.update_log(
+            f"[*] Legendas TikTok: {'ATIVADAS' if self.chk_tiktok_captions.isChecked() else 'DESATIVADAS'}"
+        )
+        self.update_log(
+            f"[*] Pré-visualização: {'DESATIVADA (render direto)' if self.chk_skip_preview.isChecked() else 'ATIVADA'}"
+        )
 
         self.btn_action.setEnabled(False)
         self.btn_action.setText("Processando... Aguarde.")
+        self.combo_provider.setEnabled(False)
         self.combo_model.setEnabled(False)
+        self.edit_api_key.setEnabled(False)
         self.combo_whisper_model.setEnabled(False)
         self.drop_zone.setEnabled(False)
 
@@ -404,10 +614,17 @@ class ViralApp(QMainWindow):
         self.worker = VideoProcessorThread(
             self.current_video_path,
             model_name=model_selected,
+            llm_provider=provider_selected,
+            llm_api_key=self.edit_api_key.text().strip() or None,
             output_dir=self.output_folder_path,
             prompt_type=self.combo_prompt.currentText(),
             whisper_model=self.combo_whisper_model.currentText(),
+            whisper_device_mode=self.combo_whisper_device.currentText(),
             resolution=self.combo_resolution.currentText(),
+            export_quality=self.combo_resolution.currentText(),
+            aspect_ratio=self.combo_aspect_ratio.currentText(),
+            framing_mode=self.combo_framing_mode.currentText(),
+            enable_tiktok_captions=self.chk_tiktok_captions.isChecked(),
             bitrate=self.edit_bitrate.text().strip(),
             custom_prompt=(
                 self.edit_custom_prompt.toPlainText().strip()
@@ -425,6 +642,15 @@ class ViralApp(QMainWindow):
         self.log_output.append(f"> {text}")
 
     def on_clips_ready(self, clips_dicts: list[dict]) -> None:
+        if self.chk_skip_preview.isChecked():
+            selected_clips = [Clip(**c) for c in clips_dicts]
+            self.update_log(
+                f"[→] Pré-visualização desativada. Renderização direta de {len(selected_clips)} clipe(s)."
+            )
+            if self.worker:
+                self.worker.selected_clips = selected_clips
+            return
+
         self.update_log(f"[→] Abrindo seletor de clipes com {len(clips_dicts)} opções...")
         clips = [Clip(**c) for c in clips_dicts]
         dialog = ClipSelectionDialog(clips, self)
@@ -462,11 +688,29 @@ class ViralApp(QMainWindow):
             QProgressBar::chunk { background-color: #28a745; border-radius: 4px; }
         """
         )
+        self._open_output_folder()
+
+    def _open_output_folder(self) -> None:
+        try:
+            if self.output_folder_path:
+                target = Path(self.output_folder_path)
+            elif self.current_video_path:
+                target = config.EXPORTS_ROOT / f"{Path(self.current_video_path).stem}_processed"
+            else:
+                return
+            target.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(target))  # type: ignore[attr-defined]
+            self.update_log(f"[*] Pasta de saída aberta: {target}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Falha ao abrir pasta de saída: %s", e)
 
     def _unlock_ui_after_process(self) -> None:
         self.btn_action.setEnabled(True)
+        self.combo_provider.setEnabled(True)
         self.combo_model.setEnabled(True)
+        self.edit_api_key.setEnabled(self._current_llm_provider() == "gemini")
         self.combo_whisper_model.setEnabled(True)
+        self.combo_whisper_device.setEnabled(True)
         self.drop_zone.setEnabled(True)
 
     def reset_ui_for_new_video(self) -> None:

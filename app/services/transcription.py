@@ -12,16 +12,6 @@ def _release_whisper_resources(model: WhisperModel | None) -> None:
     if model is not None:
         del model
     gc.collect()
-    try:
-        import torch #type: ignore
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            try:
-                torch.cuda.synchronize()
-            except Exception:  # noqa: BLE001
-                pass
-    except ImportError:
-        pass
 
 
 def _looks_like_gpu_share_failure(exc: BaseException) -> bool:
@@ -100,6 +90,8 @@ def _transcribe_once(
 def transcribe_audio(
     audio_path: Path,
     model_name: str | None = None,
+    device_override: str | None = None,
+    compute_override: str | None = None,
 ) -> Tuple[List[Dict[str, Any]], float]:
     """
     Transcreve o áudio com Faster-Whisper, segmentos alinhados e timestamps por palavra.
@@ -107,8 +99,8 @@ def transcribe_audio(
     Se a GPU falhar por falta de memória (cenário frequente com ``ollama serve`` na mesma
     GPU), repete automaticamente em CPU (int8), mais lento porém estável.
     """
-    device = config.WHISPER_DEVICE
-    compute = config.WHISPER_COMPUTE_TYPE
+    device = (device_override or config.WHISPER_DEVICE).strip().lower()
+    compute = (compute_override or config.WHISPER_COMPUTE_TYPE).strip().lower()
     model_size = model_name or config.WHISPER_MODEL
 
     try:

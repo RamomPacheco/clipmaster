@@ -1,8 +1,12 @@
 from __future__ import annotations
+
 import json
+import os
 import re
 from typing import Any, Dict, List, Tuple
+
 import ollama
+
 from app.core.config import DEFAULT_LLM_MODEL
 from app.core.logger import logger
 
@@ -165,40 +169,85 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
     return base_system, base_user
 
 
+def _extract_json_array(raw_content: str) -> List[Dict[str, Any]]:
+    match = re.search(r"\[.*\]", raw_content, re.DOTALL)
+    if not match:
+        return []
+    return json.loads(match.group(0).strip())
+
+
+def _analyze_with_ollama(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+) -> List[Dict[str, Any]]:
+    response = ollama.chat(
+        model=model_to_use,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        format="json",
+        options={
+            "num_ctx": 2048,
+            "temperature": 0.1,
+            "top_p": 0.9,
+        },
+    )
+    raw_content = response["message"]["content"]
+    return _extract_json_array(raw_content)
+
+
+def _analyze_with_gemini(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str | None = None,
+) -> List[Dict[str, Any]]:
+    try:
+        import google.generativeai as genai
+    except ImportError as e:
+        raise RuntimeError(
+            "Pacote 'google-generativeai' não instalado. Instale para usar Gemini API."
+        ) from e
+
+    api_key_to_use = (api_key or "").strip() or os.environ.get("GOOGLE_API_KEY")
+    if not api_key_to_use:
+        raise RuntimeError("GOOGLE_API_KEY não definido no ambiente.")
+
+    # Segue o padrão do exemplo fornecido pelo usuário.
+    genai.configure(api_key=api_key_to_use)
+    model = genai.GenerativeModel(model_to_use)
+    response = model.generate_content(
+        f"{system_prompt}\n\n{user_prompt}",
+        generation_config={
+            "temperature": 0.1,
+            "top_p": 0.9,
+        },
+    )
+    raw_content = getattr(response, "text", "") or ""
+    return _extract_json_array(raw_content)
+
+
 def analyze_viral_potential(
     text: str,
     model_name: str | None,
     prompt_type: str,
     custom_prompt: str | None,
+    provider: str = "ollama",
+    api_key: str | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Extrai clipes candidatos usando o Ollama, mantendo o comportamento do código original.
     """
     system_prompt, user_prompt = build_prompts(prompt_type, text, custom_prompt)
     model_to_use = model_name or DEFAULT_LLM_MODEL
+    provider = provider.strip().lower()
 
     try:
-        response = ollama.chat(
-            model=model_to_use,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            format="json",
-            options={
-                "num_ctx": 2048,
-                "temperature": 0.1,
-                "top_p": 0.9,
-            },
-        )
-        raw_content = response["message"]["content"]
-
-        match = re.search(r"\[.*\]", raw_content, re.DOTALL)
-        if not match:
-            return []
-
-        return json.loads(match.group(0).strip())
-
+        if provider == "gemini":
+            return _analyze_with_gemini(system_prompt, user_prompt, model_to_use, api_key)
+        return _analyze_with_ollama(system_prompt, user_prompt, model_to_use)
     except ollama.ResponseError as e:
         logger.error("Erro na resposta do Ollama: %s", e)
         return []

@@ -35,16 +35,25 @@ class VideoProcessorThread(QThread):
         self,
         video_path: str,
         model_name: str,
+        llm_provider: str = "ollama",
+        llm_api_key: str | None = None,
         output_dir: Optional[str] = None,
         prompt_type: str = "Padrão (Equilibrado)",
         whisper_model: str | None = None,
+        whisper_device_mode: str = "Auto (recomendado)",
         resolution: str = "1080p",
+        export_quality: str = "Alta (mais lenta)",
+        aspect_ratio: str = "Vertical (9:16) - Redes sociais",
+        framing_mode: str = "Manter conteúdo (com bordas)",
+        enable_tiktok_captions: bool = False,
         bitrate: str = "",
         custom_prompt: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.video_path = Path(video_path)
         self.model_name = model_name
+        self.llm_provider = llm_provider
+        self.llm_api_key = llm_api_key
         self.output_dir = (
             Path(output_dir)
             if output_dir
@@ -52,8 +61,13 @@ class VideoProcessorThread(QThread):
         )
         self.prompt_type = prompt_type
         self.whisper_model = whisper_model
+        self.whisper_device_mode = whisper_device_mode
         self.selected_clips: Optional[ClipList] = None
         self.resolution = resolution
+        self.export_quality = export_quality
+        self.aspect_ratio = aspect_ratio
+        self.framing_mode = framing_mode
+        self.enable_tiktok_captions = enable_tiktok_captions
         self.bitrate = bitrate
         self.custom_prompt = custom_prompt
 
@@ -89,8 +103,27 @@ class VideoProcessorThread(QThread):
             temp_audio_path = extract_safe_audio(self.video_path, self.output_dir)
 
             # Fase 1 - transcrição
+            device_mode = self.whisper_device_mode.lower()
+            if "cpu" in device_mode:
+                whisper_device = "cpu"
+                whisper_compute = "int8"
+            elif "gpu" in device_mode or "cuda" in device_mode:
+                whisper_device = "cuda"
+                # Mais estável que float16 puro em muitas máquinas Windows/CUDA
+                whisper_compute = "int8_float16"
+            else:
+                # Auto: prioriza estabilidade (CPU) quando possível.
+                # Se quiser forçar GPU, use a opção explícita "GPU CUDA".
+                whisper_device = "cpu"
+                whisper_compute = "int8"
+            self.progress_signal.emit(
+                f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
+            )
             segments, max_video_duration = transcribe_audio(
-                temp_audio_path, model_name=self.whisper_model
+                temp_audio_path,
+                model_name=self.whisper_model,
+                device_override=whisper_device,
+                compute_override=whisper_compute,
             )
             self.metrics.transcription_time = time.time() - self.metrics.start_time
 
@@ -101,7 +134,7 @@ class VideoProcessorThread(QThread):
                 pass
 
             self.progress_signal.emit(
-                "Transcrição concluída. A preparar motor de Análise (Ollama)..."
+                f"Transcrição concluída. A preparar motor de Análise ({self.llm_provider.title()})..."
             )
 
             import gc
@@ -135,6 +168,8 @@ class VideoProcessorThread(QThread):
                     model_name=self.model_name,
                     prompt_type=self.prompt_type,
                     custom_prompt=self.custom_prompt,
+                    provider=self.llm_provider,
+                    api_key=self.llm_api_key,
                 )
                 for c in raw_clips:
                     try:
@@ -218,7 +253,12 @@ class VideoProcessorThread(QThread):
                 video_path=self.video_path,
                 clips=self.selected_clips,
                 output_dir=self.output_dir,
+                segments=segments,
                 resolution=self.resolution,
+                export_quality=self.export_quality,
+                aspect_ratio=self.aspect_ratio,
+                framing_mode=self.framing_mode,
+                enable_tiktok_captions=self.enable_tiktok_captions,
                 bitrate=self.bitrate or None,
             )
 

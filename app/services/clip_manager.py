@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import json
 import time
-from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 from app.core import config
