@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 import subprocess
 from pathlib import Path
 from typing import Iterable
-
 from app.core.logger import logger
 from app.models.schemas import Clip
 

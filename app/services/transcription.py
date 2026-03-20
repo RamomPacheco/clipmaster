@@ -1,11 +1,8 @@
 from __future__ import annotations
-
 import gc
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
-
 from faster_whisper import WhisperModel
-
 from app.core import config
 from app.core.logger import logger
 
@@ -16,8 +13,7 @@ def _release_whisper_resources(model: WhisperModel | None) -> None:
         del model
     gc.collect()
     try:
-        import torch
-
+        import torch #type: ignore
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             try:

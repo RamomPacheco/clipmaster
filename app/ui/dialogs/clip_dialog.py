@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 import subprocess
 from pathlib import Path
 from typing import Dict, List
-
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -17,7 +15,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from app.models.schemas import Clip
 
 
