@@ -18,6 +18,8 @@ _TIMESTAMP_RULE = """
     cobrindo uma ou várias linhas inteiras). Não invente segundos que não existam no texto.
 """
 
+_HF_PIPELINE_CACHE: Dict[str, Any] = {}
+
 
 def _base_system_prompt() -> str:
     return (
@@ -229,6 +231,43 @@ def _analyze_with_gemini(
     return _extract_json_array(raw_content)
 
 
+def _analyze_with_transformers(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    max_new_tokens: int | None = None,
+) -> List[Dict[str, Any]]:
+    try:
+        import torch
+        from transformers import pipeline
+    except ImportError as e:
+        raise RuntimeError(
+            "Pacotes de Transformers não instalados. Instale 'transformers', 'torch' e 'accelerate'."
+        ) from e
+
+    pipe = _HF_PIPELINE_CACHE.get(model_to_use)
+    if pipe is None:
+        pipe = pipeline(
+            "text-generation",
+            model=model_to_use,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            device_map="auto",
+        )
+        _HF_PIPELINE_CACHE[model_to_use] = pipe
+
+    prompt = f"{system_prompt}\n\n{user_prompt}\n\nRetorne apenas JSON válido."
+    response = pipe(
+        prompt,
+        max_new_tokens=max(64, min(int(max_new_tokens or 700), 2048)),
+        do_sample=False,
+        temperature=0.1,
+    )
+    raw_content = ""
+    if isinstance(response, list) and response:
+        raw_content = str(response[0].get("generated_text", ""))
+    return _extract_json_array(raw_content)
+
+
 def analyze_viral_potential(
     text: str,
     model_name: str | None,
@@ -236,6 +275,7 @@ def analyze_viral_potential(
     custom_prompt: str | None,
     provider: str = "ollama",
     api_key: str | None = None,
+    max_new_tokens: int | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Extrai clipes candidatos usando o Ollama, mantendo o comportamento do código original.
@@ -247,6 +287,13 @@ def analyze_viral_potential(
     try:
         if provider == "gemini":
             return _analyze_with_gemini(system_prompt, user_prompt, model_to_use, api_key)
+        if provider == "transformers":
+            return _analyze_with_transformers(
+                system_prompt,
+                user_prompt,
+                model_to_use,
+                max_new_tokens=max_new_tokens,
+            )
         return _analyze_with_ollama(system_prompt, user_prompt, model_to_use)
     except ollama.ResponseError as e:
         logger.error("Erro na resposta do Ollama: %s", e)

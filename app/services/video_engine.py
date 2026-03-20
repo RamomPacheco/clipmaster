@@ -157,6 +157,10 @@ def render_clips(
     def build_tiktok_ass_for_clip(clip: Clip, clip_index: int) -> Path | None:
         if not segments:
             return None
+        #TODO: Ajustar a legenda para o TikTok
+        # Ajuste fino para evitar adiantamento residual da legenda.
+        # Valor positivo atrasa levemente a exibição.
+        subtitle_delay_s = 0.20
         words: List[Dict[str, Any]] = []
         for seg in segments:
             for w in seg.get("words") or []:
@@ -178,8 +182,8 @@ def render_clips(
         if words:
             groups = [words[idx : idx + 4] for idx in range(0, len(words), 4)]
             for group in groups:
-                start = max(0.0, group[0]["start"] - clip.start)
-                end = max(start + 0.01, group[-1]["end"] - clip.start)
+                start = max(0.0, (group[0]["start"] - clip.start) + subtitle_delay_s)
+                end = max(start + 0.01, (group[-1]["end"] - clip.start) + subtitle_delay_s)
                 karaoke_text = ""
                 for idx, item in enumerate(group):
                     current_start = float(item["start"])
@@ -207,6 +211,8 @@ def render_clips(
                     continue
                 rel_start = max(0.0, max(seg_start, clip.start) - clip.start)
                 rel_end = max(rel_start + 0.2, min(seg_end, clip.end) - clip.start)
+                rel_start += subtitle_delay_s
+                rel_end = max(rel_start + 0.2, rel_end + subtitle_delay_s)
                 lines.append(
                     f"Dialogue: 0,{sec_to_ass(rel_start)},{sec_to_ass(rel_end)},Default,,0,0,0,,{ass_escape(text)}"
                 )

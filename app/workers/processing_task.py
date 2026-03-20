@@ -47,6 +47,7 @@ class VideoProcessorThread(QThread):
         framing_mode: str = "Manter conteúdo (com bordas)",
         enable_tiktok_captions: bool = False,
         bitrate: str = "",
+        llm_max_new_tokens: int | None = None,
         custom_prompt: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -69,6 +70,7 @@ class VideoProcessorThread(QThread):
         self.framing_mode = framing_mode
         self.enable_tiktok_captions = enable_tiktok_captions
         self.bitrate = bitrate
+        self.llm_max_new_tokens = llm_max_new_tokens
         self.custom_prompt = custom_prompt
 
         self.metrics = ProcessingMetrics(
@@ -170,6 +172,7 @@ class VideoProcessorThread(QThread):
                     custom_prompt=self.custom_prompt,
                     provider=self.llm_provider,
                     api_key=self.llm_api_key,
+                    max_new_tokens=self.llm_max_new_tokens,
                 )
                 for c in raw_clips:
                     try:

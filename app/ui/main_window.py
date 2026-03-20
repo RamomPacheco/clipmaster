@@ -78,6 +78,8 @@ class ViralApp(QMainWindow):
         text = self.combo_provider.currentText().strip().lower()
         if "gemini" in text:
             return "gemini"
+        if "transformers" in text or "hugging face" in text:
+            return "transformers"
         return "ollama"
 
     def _sync_llm_model_options(self) -> None:
@@ -89,10 +91,25 @@ class ViralApp(QMainWindow):
             self.combo_model.setToolTip("Selecione o modelo para uso via API Gemini.")
             if "gemini-2.5-flash" in self._get_gemini_models():
                 self.combo_model.setCurrentText("gemini-2.5-flash")
+            self.combo_model.setEditable(False)
+        elif provider == "transformers":
+            self.lbl_model.setText("Modelo de IA (Transformers Local):")
+            self.combo_model.addItems(
+                [
+                    "zai-org/GLM-4.7",
+                    "Qwen/Qwen2.5-3B-Instruct",
+                    "Qwen/Qwen2.5-7B-Instruct",
+                ]
+            )
+            self.combo_model.setToolTip(
+                "Informe um model_id do Hugging Face (ex.: zai-org/GLM-4.7)."
+            )
+            self.combo_model.setEditable(True)
         else:
             self.lbl_model.setText("Modelo de IA (Ollama Local):")
             self.combo_model.addItems(self._get_available_models())
             self.combo_model.setToolTip("Selecione o modelo disponível no Ollama local.")
+            self.combo_model.setEditable(False)
 
     def _on_provider_changed(self) -> None:
         self._sync_llm_model_options()
@@ -199,7 +216,9 @@ class ViralApp(QMainWindow):
         lbl_provider.setStyleSheet("font-size: 14px; font-weight: bold; color: #dddddd;")
 
         self.combo_provider = QComboBox()
-        self.combo_provider.addItems(["Local (Ollama)", "API (Gemini)"])
+        self.combo_provider.addItems(
+            ["Local (Ollama)", "API (Gemini)", "Local (Transformers)"]
+        )
         self.combo_provider.setCurrentText("Local (Ollama)")
         self.combo_provider.setMinimumHeight(30)
         self.combo_provider.currentTextChanged.connect(self._on_provider_changed)
@@ -395,6 +414,15 @@ class ViralApp(QMainWindow):
         self.edit_custom_prompt.setPlaceholderText("Deixe vazio para usar prompts padrão...")
         advanced_layout.addWidget(lbl_custom_prompt)
         advanced_layout.addWidget(self.edit_custom_prompt)
+
+        lbl_max_tokens = QLabel("Transformers: max_new_tokens (opcional):")
+        self.edit_max_new_tokens = QLineEdit()
+        self.edit_max_new_tokens.setPlaceholderText("Ex.: 700 (vazio = padrão)")
+        self.edit_max_new_tokens.setToolTip(
+            "Usado apenas no provedor Local (Transformers). Menor = mais rápido, maior = mais contexto."
+        )
+        advanced_layout.addWidget(lbl_max_tokens)
+        advanced_layout.addWidget(self.edit_max_new_tokens)
 
         self.chk_dark_theme = QCheckBox("Tema Escuro")
         self.chk_dark_theme.setChecked(True)
@@ -626,6 +654,11 @@ class ViralApp(QMainWindow):
             framing_mode=self.combo_framing_mode.currentText(),
             enable_tiktok_captions=self.chk_tiktok_captions.isChecked(),
             bitrate=self.edit_bitrate.text().strip(),
+            llm_max_new_tokens=(
+                int(self.edit_max_new_tokens.text().strip())
+                if self.edit_max_new_tokens.text().strip().isdigit()
+                else None
+            ),
             custom_prompt=(
                 self.edit_custom_prompt.toPlainText().strip()
                 if self.edit_custom_prompt.toPlainText().strip()
