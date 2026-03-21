@@ -188,3 +188,6 @@ docker-compose.override.yml
 *.json
 *workspaces.xml
 *.code-workspace
+
+# Documentacao local (nao versionar)
+local_docs/
