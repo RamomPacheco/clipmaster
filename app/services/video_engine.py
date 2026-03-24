@@ -1,11 +1,637 @@
 from __future__ import annotations
 
 import subprocess
+import textwrap
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from collections import defaultdict
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.core.logger import logger
 from app.models.schemas import Clip
+
+PROFILE_MAP = {
+    "SD (720p)": {"preset": "veryfast", "crf": "24", "height": 720},
+    "HD (1080p)": {"preset": "medium", "crf": "21", "height": 1080},
+    "2K (1440p)": {"preset": "slow", "crf": "20", "height": 1440},
+    "4K (2160p)": {"preset": "slow", "crf": "18", "height": 2160},
+}
+FALLBACK_PROFILE = {"preset": "medium", "crf": "21", "height": 1080}
+
+
+def get_export_dimensions(
+    resolution: str,
+    export_quality: str,
+    aspect_ratio: str,
+) -> tuple[int, int]:
+    profile = PROFILE_MAP.get(export_quality) or PROFILE_MAP.get(resolution) or FALLBACK_PROFILE
+    is_vertical = "9:16" in aspect_ratio
+    base_h = int(profile["height"])
+    base_w = int(round(base_h * (9 / 16 if is_vertical else 16 / 9)))
+    target_w = base_w - (base_w % 2)
+    target_h = base_h - (base_h % 2)
+    return target_w, target_h
+
+
+def tiktok_subtitle_style_sizes(target_w: int, target_h: int) -> tuple[int, int]:
+    """Mesmos parâmetros de fonte/margem usados nas legendas TikTok (.ass)."""
+    style_font_size = max(34, int(round(target_h * 0.06)))
+    style_margin_v = max(70, int(round(target_h * 0.09)))
+    return style_font_size, style_margin_v
+
+
+def tiktok_ass_v4_style_block(target_w: int, target_h: int) -> str:
+    """Bloco [V4+ Styles] (Format + Style Default) idêntico ao dos clipes com legenda."""
+    fs, mv = tiktok_subtitle_style_sizes(target_w, target_h)
+    return (
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Default,Arial,{fs},&H00FFFFFF,&H0000E5FF,&H00101010,&H80000000,1,0,0,0,"
+        f"100,100,0,0,1,4,1,2,80,80,{mv},1"
+    )
+
+
+def tiktok_cover_ass_v4_style_block(target_w: int, target_h: int) -> str:
+    """
+    Estilo da capa: mesma família tipográfica/tamanho-base das legendas, com cor de destaque
+    (amarelo-ouro), negrito e contorno/sombra mais fortes para thumbnail.
+    """
+    fs, mv = tiktok_subtitle_style_sizes(target_w, target_h)
+    return (
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: Cover,Arial,{fs},&H0000D7FF,&H0000E5FF,&H00000000,&H80000000,-1,0,0,0,"
+        f"102,102,0,0,1,6,3,2,80,80,{mv},1"
+    )
+
+
+def _ass_escape_basic(text: str) -> str:
+    return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+
+
+def _ffmpeg_extract_frame_png_bytes(video_path: Path, t_sec: float) -> Optional[bytes]:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{max(0.0, t_sec):.3f}",
+        "-i",
+        str(video_path),
+        "-an",
+        "-sn",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-c:v",
+        "png",
+        "pipe:1",
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0 or not proc.stdout:
+        err = (proc.stderr or b"").decode(errors="replace")[:400]
+        logger.debug("FFmpeg extrair frame em %.3fs falhou: %s", t_sec, err)
+        return None
+    return proc.stdout
+
+
+def _iou_rects(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    x1, y1 = max(ax, bx), max(ay, by)
+    x2, y2 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter <= 0:
+        return 0.0
+    union = float(aw * ah + bw * bh) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _nms_face_rects(
+    rects: List[Tuple[int, int, int, int]], iou_thresh: float = 0.35
+) -> List[Tuple[int, int, int, int]]:
+    if not rects:
+        return []
+    rects = sorted(rects, key=lambda r: r[2] * r[3], reverse=True)
+    kept: List[Tuple[int, int, int, int]] = []
+    for r in rects:
+        if all(_iou_rects(r, k) < iou_thresh for k in kept):
+            kept.append(r)
+    return kept
+
+
+def _haar_detect_rects(
+    cascade: Any,
+    gray: Any,
+    *,
+    scale_factor: float,
+    min_neighbors: int,
+    min_side: int,
+) -> List[Tuple[int, int, int, int]]:
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=scale_factor,
+        minNeighbors=min_neighbors,
+        minSize=(min_side, min_side),
+        flags=0,
+    )
+    return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+
+
+def _face_centers_from_gray(gray: Any, fw: int, fh: int) -> List[Tuple[float, float, float]]:
+    """
+    Retorna lista de (cx, cy, score) em coordenadas normalizadas [0,1], score para desempate.
+    """
+    try:
+        import cv2  # type: ignore[import-not-found]
+    except Exception:
+        return []
+
+    haarc = cv2.data.haarcascades
+    cascade_names = (
+        "haarcascade_frontalface_default.xml",
+        "haarcascade_frontalface_alt2.xml",
+        "haarcascade_frontalface_alt.xml",
+        "haarcascade_profileface.xml",
+    )
+    frame_area = float(max(1, fw * fh))
+    min_px = max(18, int(round(min(fw, fh) * 0.04)))
+    param_sets = (
+        (1.05, 3),
+        (1.08, 2),
+        (1.12, 2),
+    )
+
+    all_rects: List[Tuple[int, int, int, int]] = []
+    for name in cascade_names:
+        path = haarc + name
+        cascade = cv2.CascadeClassifier(path)
+        if cascade.empty():
+            continue
+        for sf, mn in param_sets:
+            all_rects.extend(
+                _haar_detect_rects(cascade, gray, scale_factor=sf, min_neighbors=mn, min_side=min_px)
+            )
+
+    merged = _nms_face_rects(all_rects, iou_thresh=0.32)
+    out: List[Tuple[float, float, float]] = []
+    for (x, y, w, h) in merged:
+        area = float(w * h)
+        if area < frame_area * 0.00035:
+            continue
+        cx = (x + w / 2.0) / float(fw)
+        cy = (y + h / 2.0) / float(fh)
+        area_n = area / frame_area
+        # Preferir rostos maiores e um pouco mais centrados (reduz falsos positivos nas bordas).
+        edge_pen = 1.0 - 0.22 * (abs(cx - 0.5) + abs(cy - 0.5))
+        score = area_n * max(0.35, edge_pen)
+        out.append((cx, cy, score))
+    out.sort(key=lambda t: t[2], reverse=True)
+    return out
+
+
+def _best_face_center_ratios(frame: Any) -> Optional[Tuple[float, float]]:
+    """
+    Melhor estimativa do centro do rosto principal (cx, cy) em [0,1].
+    Usa várias cascatas, escalas Haar, NMS e tentativas em pirâmide (rosto pequeno / frame grande).
+    """
+    try:
+        import cv2  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    # Deteção em resolução moderada: coords normalizadas são invariantes; 4K fica muito mais leve.
+    gh, gw = gray.shape[:2]
+    max_side = max(gw, gh)
+    det_max = 1024
+    if max_side > det_max:
+        ds = det_max / float(max_side)
+        work = cv2.resize(gray, None, fx=ds, fy=ds, interpolation=cv2.INTER_AREA)
+    else:
+        work = gray
+    fh, fw = work.shape[:2]
+    candidates: List[Tuple[float, float, float]] = _face_centers_from_gray(work, fw, fh)
+
+    # Rostos muito pequenos no plano de deteção: ampliar levemente.
+    if not candidates:
+        big = cv2.resize(work, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+        bh, bw = big.shape[:2]
+        for cx, cy, sc in _face_centers_from_gray(big, bw, bh):
+            candidates.append((cx, cy, sc * 0.88))
+
+    if not candidates:
+        return None
+    best_cx, best_cy, _ = max(candidates, key=lambda t: t[2])
+    return (max(0.0, min(1.0, best_cx)), max(0.0, min(1.0, best_cy)))
+
+
+def detect_face_center_ratios_at_time(video_path: Path, t_sec: float) -> Optional[Tuple[float, float]]:
+    raw = _ffmpeg_extract_frame_png_bytes(video_path, t_sec)
+    if not raw:
+        return None
+    try:
+        import cv2  # type: ignore[import-not-found]
+        import numpy as np  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return None
+    return _best_face_center_ratios(frame)
+
+
+def _median(xs: List[float]) -> float:
+    if not xs:
+        return 0.5
+    s = sorted(xs)
+    m = len(s) // 2
+    return float(s[m]) if len(s) % 2 else (s[m - 1] + s[m]) / 2.0
+
+
+def _stratified_clip_sample_times(clip_start: float, clip_end: float, n_total: int) -> List[float]:
+    """
+    Distribui instantes ao longo do clipe (vários segmentos temporais).
+    Assim, após um corte de câmara, ainda há amostras no plano anterior e no novo —
+    o cluster dominante reflete o enquadramento onde o rosto aparece mais tempo.
+    """
+    duration = max(0.1, clip_end - clip_start)
+    n_seg = 4
+    per = max(1, n_total // n_seg)
+    times: List[float] = []
+    for seg in range(n_seg):
+        t0 = clip_start + duration * seg / n_seg
+        t1 = clip_start + duration * (seg + 1) / n_seg
+        span = max(0.02, t1 - t0)
+        for k in range(per):
+            frac = (k + 0.5) / per
+            times.append(t0 + span * frac)
+    while len(times) < n_total:
+        times.append(clip_start + duration * (len(times) + 0.5) / n_total)
+    return times[:n_total]
+
+
+def _dominant_spatial_cluster_median(
+    points: List[Tuple[float, float]],
+    grid_n: int = 7,
+) -> Tuple[float, float]:
+    """
+    Agrupa posições (cx, cy) numa grelha 2D e escolhe a região com mais detecções
+    (vizinhança 3×3), depois mediana dentro desse conjunto. Robustez a mudanças de câmara:
+    um único plano errado não domina sobre a maioria dos frames no outro enquadramento.
+    """
+    if not points:
+        return (0.5, 0.5)
+    if len(points) == 1:
+        return (max(0.0, min(1.0, points[0][0])), max(0.0, min(1.0, points[0][1])))
+
+    buckets: Dict[Tuple[int, int], List[Tuple[float, float]]] = defaultdict(list)
+    for cx, cy in points:
+        bx = min(grid_n - 1, max(0, int(cx * grid_n)))
+        by = min(grid_n - 1, max(0, int(cy * grid_n)))
+        buckets[(bx, by)].append((cx, cy))
+
+    def cell_score(bx: int, by: int) -> float:
+        sc = float(len(buckets.get((bx, by), [])))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                sc += len(buckets.get((bx + dx, by + dy), [])) * 0.45
+        return sc
+
+    best_cell: Optional[Tuple[int, int]] = None
+    best_sc = -1.0
+    for (bx, by) in buckets:
+        sc = cell_score(bx, by)
+        if sc > best_sc:
+            best_sc = sc
+            best_cell = (bx, by)
+
+    if best_cell is None:
+        mx = _median([p[0] for p in points])
+        my = _median([p[1] for p in points])
+        return (max(0.0, min(1.0, mx)), max(0.0, min(1.0, my)))
+
+    bx, by = best_cell
+    pooled: List[Tuple[float, float]] = []
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            pooled.extend(buckets.get((bx + dx, by + dy), []))
+
+    # Se o "vencedor" é muito pequeno face ao total, há vários planos equiparados — mediana global.
+    min_support = max(2, int(round(0.2 * len(points))))
+    if len(pooled) < min_support:
+        mx = _median([p[0] for p in points])
+        my = _median([p[1] for p in points])
+        return (max(0.0, min(1.0, mx)), max(0.0, min(1.0, my)))
+
+    mx = _median([p[0] for p in pooled])
+    my = _median([p[1] for p in pooled])
+    return (max(0.0, min(1.0, mx)), max(0.0, min(1.0, my)))
+
+
+def _longest_temporal_run_median(
+    ordered_hits: List[Tuple[float, float]],
+    jump_thresh: float = 0.16,
+) -> Optional[Tuple[float, float]]:
+    """
+    Secundário: maior sequência temporal de detecções com saltos pequenos (mesmo plano contínuo).
+    """
+    if len(ordered_hits) < 3:
+        return None
+    best_len = 0
+    best_slice: List[Tuple[float, float]] = []
+    cur: List[Tuple[float, float]] = [ordered_hits[0]]
+    for i in range(1, len(ordered_hits)):
+        px, py = ordered_hits[i - 1]
+        cx, cy = ordered_hits[i]
+        if abs(cx - px) <= jump_thresh and abs(cy - py) <= jump_thresh:
+            cur.append((cx, cy))
+        else:
+            if len(cur) > best_len:
+                best_len = len(cur)
+                best_slice = list(cur)
+            cur = [(cx, cy)]
+    if len(cur) > best_len:
+        best_slice = cur
+    if len(best_slice) < max(3, len(ordered_hits) // 5):
+        return None
+    return (
+        max(0.0, min(1.0, _median([h[0] for h in best_slice]))),
+        max(0.0, min(1.0, _median([h[1] for h in best_slice]))),
+    )
+
+
+def detect_face_center_ratios_for_clip_samples(
+    video_path: Path, clip: Clip
+) -> Optional[Tuple[float, float]]:
+    clip_start = float(clip.start)
+    clip_end = float(clip.end)
+    sample_count = 24
+    hits_ordered: List[Tuple[float, float]] = []
+    for t in _stratified_clip_sample_times(clip_start, clip_end, sample_count):
+        raw = _ffmpeg_extract_frame_png_bytes(video_path, t)
+        if not raw:
+            continue
+        try:
+            import cv2  # type: ignore[import-not-found]
+            import numpy as np  # type: ignore[import-not-found]
+        except Exception:
+            continue
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            continue
+        m = _best_face_center_ratios(frame)
+        if m:
+            hits_ordered.append(m)
+    if not hits_ordered:
+        return None
+
+    dom = _dominant_spatial_cluster_median(hits_ordered)
+    run = _longest_temporal_run_median(hits_ordered)
+    # Se a corrida longa concorda com o cluster dominante, reforça; se diverge muito,
+    # confia mais no cluster (mais amostras espaciais).
+    if run is not None:
+        if abs(run[0] - dom[0]) <= 0.12 and abs(run[1] - dom[1]) <= 0.12:
+            return (
+                max(0.0, min(1.0, 0.5 * (dom[0] + run[0]))),
+                max(0.0, min(1.0, 0.5 * (dom[1] + run[1]))),
+            )
+    return dom
+
+
+def _combine_face_ratios(
+    a: Optional[Tuple[float, float]],
+    b: Optional[Tuple[float, float]],
+    weight_a: float,
+) -> Optional[Tuple[float, float]]:
+    if a and b:
+        w = max(0.0, min(1.0, weight_a))
+        return (
+            max(0.0, min(1.0, w * a[0] + (1.0 - w) * b[0])),
+            max(0.0, min(1.0, w * a[1] + (1.0 - w) * b[1])),
+        )
+    return a or b
+
+
+def _crop_vf_scale_increase_face(
+    target_w: int, target_h: int, face_xy: Optional[Tuple[float, float]]
+) -> str:
+    """
+    Após scale=increase, recorta target_w x target_h alinhado ao rosto em X e Y.
+    Sem rosto, usa crop centrado (comportamento por omissão do FFmpeg).
+    """
+    scale = f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase"
+    if face_xy is None:
+        return f"{scale},crop={target_w}:{target_h}"
+    cx, cy = face_xy
+    tw, th = target_w, target_h
+    x_expr = f"max(0\\,min(iw-{tw}\\,iw*{cx:.6f}-{tw/2:.2f}))"
+    y_expr = f"max(0\\,min(ih-{th}\\,ih*{cy:.6f}-{th/2:.2f}))"
+    return f"{scale},crop={tw}:{th}:{x_expr}:{y_expr}"
+
+
+def build_framing_vf(
+    target_w: int,
+    target_h: int,
+    framing_mode: str,
+    video_path: Path,
+    clip: Optional[Clip],
+    focus_time_abs: Optional[float],
+) -> str:
+    lower = framing_mode.lower()
+    if "inteligente" in lower or "rosto" in lower:
+        r_focus: Optional[Tuple[float, float]] = None
+        r_clip: Optional[Tuple[float, float]] = None
+        if focus_time_abs is not None:
+            r_focus = detect_face_center_ratios_at_time(video_path, focus_time_abs)
+        if clip is not None:
+            r_clip = detect_face_center_ratios_for_clip_samples(video_path, clip)
+        # Um único instante (ex.: capa) não deve puxar o crop após cortes de câmara —
+        # o agregado do clipe (cluster dominante) manda.
+        face_xy = _combine_face_ratios(r_focus, r_clip, weight_a=0.06)
+        return _crop_vf_scale_increase_face(target_w, target_h, face_xy)
+    if "crop" in lower:
+        return (
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h}"
+        )
+    return (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
+    )
+
+
+def _path_for_ffmpeg_filter(path: Path) -> str:
+    s = path.resolve().as_posix()
+    if len(s) >= 2 and s[1] == ":":
+        return s[0] + r"\:" + s[2:]
+    return s
+
+
+def create_social_cover(
+    video_path: Path,
+    output_dir: Path,
+    clip_index: int,
+    frame_second_abs: float,
+    hook_phrase: str,
+    *,
+    resolution: str = "1080p",
+    export_quality: str = "HD (1080p)",
+    aspect_ratio: str = "Vertical (9:16) - Redes sociais",
+    framing_mode: str = "Manter conteúdo (com bordas)",
+    clip: Optional[Clip] = None,
+) -> Path:
+    """
+    Cria capa JPG alinhada à resolução/formato da exportação e ao modo de enquadramento.
+    Usa FFmpeg + texto (textfile) para evitar falhas com caracteres especiais no drawtext.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cover_path = output_dir / f"clip_{clip_index}_capa.jpg"
+    target_w, target_h = get_export_dimensions(resolution, export_quality, aspect_ratio)
+
+    hook_line = (hook_phrase or "").strip().replace("\r", " ").replace("\n", " ")[:400]
+    if not hook_line:
+        hook_line = "Momento chave"
+
+    base_vf = build_framing_vf(
+        target_w,
+        target_h,
+        framing_mode,
+        video_path,
+        clip,
+        focus_time_abs=float(frame_second_abs),
+    )
+
+    # Mesmo motor visual das legendas TikTok (ASS / libass), com quebra de linha segura.
+    fs, _mv = tiktok_subtitle_style_sizes(target_w, target_h)
+    max_chars = max(16, int(target_w / max(fs * 0.45, 1.0)))
+    wrapped = textwrap.wrap(
+        hook_line,
+        width=max_chars,
+        break_long_words=True,
+        break_on_hyphens=False,
+    )
+    if not wrapped:
+        wrapped = [hook_line]
+    hook_ass_body = r"\N".join(_ass_escape_basic(line) for line in wrapped)
+
+    ass_cover_path = output_dir / f"_cap_overlay_{clip_index}.ass"
+    ass_cover_path.write_text(
+        "\n".join(
+            [
+                "[Script Info]",
+                "ScriptType: v4.00+",
+                f"PlayResX: {target_w}",
+                f"PlayResY: {target_h}",
+                "",
+                "[V4+ Styles]",
+                tiktok_cover_ass_v4_style_block(target_w, target_h),
+                "",
+                "[Events]",
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+                f"Dialogue: 0,0:00:00.00,0:00:30.00,Cover,,0,0,0,,{hook_ass_body}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    ass_ff = _path_for_ffmpeg_filter(ass_cover_path)
+    overlay_vf = f"{base_vf},ass='{ass_ff}'"
+
+    def _run(cmd: list[str]) -> None:
+        subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            cwd=str(output_dir),
+        )
+
+    t = max(0.0, float(frame_second_abs))
+    try:
+        _run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{t:.3f}",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                overlay_vf,
+                str(cover_path),
+            ]
+        )
+        return cover_path
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            "Capa com texto falhou (clipe %s); tentando só enquadramento. FFmpeg: %s",
+            clip_index,
+            (e.stderr or "")[-500:],
+        )
+        try:
+            _run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{t:.3f}",
+                    "-i",
+                    str(video_path),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    base_vf,
+                    str(cover_path),
+                ]
+            )
+            return cover_path
+        except subprocess.CalledProcessError as e2:
+            logger.warning(
+                "Capa com enquadramento falhou (clipe %s); frame bruto. FFmpeg: %s",
+                clip_index,
+                (e2.stderr or "")[-500:],
+            )
+            _run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{t:.3f}",
+                    "-i",
+                    str(video_path),
+                    "-frames:v",
+                    "1",
+                    str(cover_path),
+                ]
+            )
+            return cover_path
+    finally:
+        try:
+            ass_cover_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def extract_safe_audio(video_path: Path, output_dir: Path) -> Path:
@@ -52,93 +678,8 @@ def render_clips(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    profile_map = {
-        "SD (720p)": {"preset": "veryfast", "crf": "24", "height": 720},
-        "HD (1080p)": {"preset": "medium", "crf": "21", "height": 1080},
-        "2K (1440p)": {"preset": "slow", "crf": "20", "height": 1440},
-        "4K (2160p)": {"preset": "slow", "crf": "18", "height": 2160},
-    }
-    fallback_profile = {"preset": "medium", "crf": "21", "height": 1080}
-    profile = profile_map.get(export_quality) or profile_map.get(resolution) or fallback_profile
-
-    is_vertical = "9:16" in aspect_ratio
-    base_h = int(profile["height"])
-    base_w = int(round(base_h * (9 / 16 if is_vertical else 16 / 9)))
-    target_w = base_w - (base_w % 2)
-    target_h = base_h - (base_h % 2)
-    target_ratio = target_w / target_h
-
-    def _detect_face_center_ratio_for_clip(clip: Clip) -> float | None:
-        """
-        Detecta o centro horizontal médio de rosto no intervalo do clipe.
-        Retorna um ratio entre 0 e 1 (posição x relativa) ou None.
-        """
-        try:
-            import cv2  # type: ignore[import-not-found]
-        except Exception:
-            logger.warning(
-                "OpenCV não disponível. Crop inteligente usará fallback central. "
-                "Instale 'opencv-python' para detecção de rosto."
-            )
-            return None
-
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            return None
-        try:
-            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            face_cascade = cv2.CascadeClassifier(cascade_path)
-            if face_cascade.empty():
-                return None
-
-            clip_start = float(clip.start)
-            clip_end = float(clip.end)
-            duration = max(0.1, clip_end - clip_start)
-            sample_count = 8
-            centers: List[float] = []
-
-            for idx in range(sample_count):
-                t = clip_start + (duration * (idx + 0.5) / sample_count)
-                cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    continue
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(
-                    gray,
-                    scaleFactor=1.1,
-                    minNeighbors=5,
-                    minSize=(40, 40),
-                )
-                if len(faces) == 0:
-                    continue
-                x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-                frame_w = float(frame.shape[1]) if frame.shape[1] else 1.0
-                centers.append((x + (w / 2.0)) / frame_w)
-
-            if not centers:
-                return None
-            return max(0.0, min(1.0, sum(centers) / len(centers)))
-        finally:
-            cap.release()
-
-    def _crop_filter_with_center_x(center_ratio: float | None) -> str:
-        """
-        Cria filtro de crop sem distorcer, centralizado no rosto quando possível.
-        """
-        if center_ratio is None:
-            return (
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h}"
-            )
-        x_expr = f"max(0,min(iw-{target_w},iw*{center_ratio:.6f}-{target_w/2:.2f}))"
-        # Em filtergraph do FFmpeg, vírgulas da expressão precisam ser escapadas,
-        # senão são interpretadas como separador de filtros.
-        x_expr = x_expr.replace(",", r"\,")
-        return (
-            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-            f"crop={target_w}:{target_h}:{x_expr}:0"
-        )
+    profile = PROFILE_MAP.get(export_quality) or PROFILE_MAP.get(resolution) or FALLBACK_PROFILE
+    target_w, target_h = get_export_dimensions(resolution, export_quality, aspect_ratio)
 
     def sec_to_ass(ts: float) -> str:
         ts = max(0.0, ts)
@@ -222,8 +763,6 @@ def render_clips(
             return None
         logger.info("Clipe %s: %s linha(s) de legenda geradas.", clip_index, len(lines))
 
-        style_font_size = max(34, int(round(target_h * 0.06)))
-        style_margin_v = max(70, int(round(target_h * 0.09)))
         ass_content = "\n".join(
             [
                 "[Script Info]",
@@ -232,8 +771,7 @@ def render_clips(
                 f"PlayResY: {target_h}",
                 "",
                 "[V4+ Styles]",
-                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-                f"Style: Default,Arial,{style_font_size},&H00FFFFFF,&H0000E5FF,&H00101010,&H80000000,1,0,0,0,100,100,0,0,1,4,1,2,80,80,{style_margin_v},1",
+                tiktok_ass_v4_style_block(target_w, target_h),
                 "",
                 "[Events]",
                 "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -291,23 +829,15 @@ def render_clips(
             "aresample=async=1",
         ]
 
-        filters: List[str] = ["setpts=PTS-STARTPTS"]
-        lower_framing = framing_mode.lower()
-        if "inteligente" in lower_framing or "rosto" in lower_framing:
-            center_ratio = _detect_face_center_ratio_for_clip(clip)
-            filters.append(_crop_filter_with_center_x(center_ratio))
-        elif "crop" in lower_framing:
-            # Preenche toda a tela 9:16/16:9, cortando o excedente sem distorcer.
-            filters.append(
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h}"
-            )
-        else:
-            # Mantém conteúdo completo, adicionando barras quando necessário.
-            filters.append(
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-                f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
-            )
+        framing_vf = build_framing_vf(
+            target_w,
+            target_h,
+            framing_mode,
+            video_path,
+            clip,
+            focus_time_abs=None,
+        )
+        filters: List[str] = ["setpts=PTS-STARTPTS", framing_vf]
 
         if filters:
             cmd.extend(["-vf", ",".join(filters)])

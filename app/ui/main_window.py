@@ -34,11 +34,13 @@ from PySide6.QtWidgets import (
 )
 
 from app.core import config  # noqa: F401  # garante import de config
+from app.core.api_key_store import ApiKeyStore
 from app.core.cuda_setup import inject_cuda_environment  # noqa: F401
 from app.core.logger import logger
 from app.models.schemas import Clip
 from app.ui.components.drop_zone import DropZone
 from app.ui.dialogs.clip_dialog import ClipSelectionDialog
+from app.ui.dialogs.save_api_key_dialog import SaveApiKeyDialog
 from app.workers.processing_task import VideoProcessorThread
 
 
@@ -50,6 +52,7 @@ class ViralApp(QMainWindow):
         self.current_video_path: str | None = None
         self.output_folder_path: str | None = None
         self.worker: VideoProcessorThread | None = None
+        self._api_key_store = ApiKeyStore()
 
         self._setup_ui()
         self._apply_dark_theme()
@@ -82,13 +85,71 @@ class ViralApp(QMainWindow):
 
         return ["gemini-2.5-flash"]
 
+    def _fetch_groq_model_list(self) -> tuple[bool, List[str]]:
+        """
+        Lista modelos via GET /openai/v1/models.
+        Retorna (sucesso_api, ids). Sem chave ou erro → lista padrão e sucesso_api=False.
+        """
+        default = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "mixtral-8x7b-32768",
+        ]
+        key = ""
+        if hasattr(self, "edit_api_key"):
+            key = self.edit_api_key.text().strip()
+        if not key:
+            key = (os.environ.get("GROQ_API_KEY") or "").strip()
+        if not key:
+            return False, list(default)
+
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("httpx não instalado; não é possível listar modelos Groq.")
+            return False, list(default)
+
+        url = "https://api.groq.com/openai/v1/models"
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                resp = client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Não foi possível listar modelos Groq: %s", e)
+            return False, list(default)
+
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list):
+            return False, list(default)
+
+        ids: List[str] = []
+        for item in data:
+            if isinstance(item, dict):
+                mid = item.get("id")
+                if isinstance(mid, str) and mid.strip():
+                    ids.append(mid.strip())
+        if not ids:
+            return False, list(default)
+
+        ids = sorted(set(ids), key=str.lower)
+        return True, ids
+
     def _current_llm_provider(self) -> str:
         text = self.combo_provider.currentText().strip().lower()
         if "gemini" in text:
             return "gemini"
+        if "groq" in text:
+            return "groq"
         if "transformers" in text or "hugging face" in text:
             return "transformers"
         return "ollama"
+
+    def _uses_cloud_api_key(self) -> bool:
+        return self._current_llm_provider() in ("gemini", "groq")
 
     def _sync_llm_model_options(self) -> None:
         provider = self._current_llm_provider()
@@ -100,6 +161,21 @@ class ViralApp(QMainWindow):
             if "gemini-2.5-flash" in self._get_gemini_models():
                 self.combo_model.setCurrentText("gemini-2.5-flash")
             self.combo_model.setEditable(False)
+        elif provider == "groq":
+            self.lbl_model.setText("Modelo de IA (Groq API):")
+            live, groq_models = self._fetch_groq_model_list()
+            self.combo_model.addItems(groq_models)
+            prefer = "llama-3.3-70b-versatile"
+            if prefer in groq_models:
+                self.combo_model.setCurrentText(prefer)
+            elif groq_models:
+                self.combo_model.setCurrentIndex(0)
+            self.combo_model.setToolTip(
+                "Modelos devolvidos pela API Groq para a sua chave."
+                if live
+                else "Lista padrão — cole a chave Groq e mude de campo ou de provedor para atualizar."
+            )
+            self.combo_model.setEditable(not live)
         elif provider == "transformers":
             self.lbl_model.setText("Modelo de IA (Transformers Local):")
             self.combo_model.addItems(
@@ -119,10 +195,208 @@ class ViralApp(QMainWindow):
             self.combo_model.setToolTip("Selecione o modelo disponível no Ollama local.")
             self.combo_model.setEditable(False)
 
+        self._sync_social_llm_model_options()
+        self._on_social_model_mode_changed()
+
+    def _sync_social_llm_model_options(self) -> None:
+        """Preenche o combo do modelo alternativo do pacote social (mesmo provedor da análise)."""
+        if not hasattr(self, "combo_social_model"):
+            return
+        provider = self._current_llm_provider()
+        prev = self.combo_social_model.currentText().strip()
+        self.combo_social_model.blockSignals(True)
+        self.combo_social_model.clear()
+        if provider == "gemini":
+            models = self._get_gemini_models()
+            self.combo_social_model.addItems(models)
+            self.combo_social_model.setToolTip("Modelo Gemini só para capa e descrição social.")
+            self.combo_social_model.setEditable(False)
+            if prev in models:
+                self.combo_social_model.setCurrentText(prev)
+            elif "gemini-2.5-flash" in models:
+                self.combo_social_model.setCurrentText("gemini-2.5-flash")
+        elif provider == "groq":
+            live, models = self._fetch_groq_model_list()
+            self.combo_social_model.addItems(models)
+            self.combo_social_model.setToolTip(
+                "Modelos Groq (API) para o pacote social."
+                if live
+                else "Lista padrão Groq — use chave API para listar todos."
+            )
+            self.combo_social_model.setEditable(not live)
+            if prev in models:
+                self.combo_social_model.setCurrentText(prev)
+            elif "llama-3.3-70b-versatile" in models:
+                self.combo_social_model.setCurrentText("llama-3.3-70b-versatile")
+            elif models:
+                self.combo_social_model.setCurrentIndex(0)
+        elif provider == "transformers":
+            self.combo_social_model.addItems(
+                [
+                    "zai-org/GLM-4.7",
+                    "Qwen/Qwen2.5-3B-Instruct",
+                    "Qwen/Qwen2.5-7B-Instruct",
+                ]
+            )
+            self.combo_social_model.setToolTip(
+                "Model_id Hugging Face para capa/descrição (pode editar o texto)."
+            )
+            self.combo_social_model.setEditable(True)
+            if prev:
+                self.combo_social_model.setCurrentText(prev)
+        else:
+            self.combo_social_model.addItems(self._get_available_models())
+            self.combo_social_model.setToolTip(
+                "Modelo Ollama só para gerar frase e descrição do pacote social."
+            )
+            self.combo_social_model.setEditable(False)
+            if prev:
+                self.combo_social_model.setCurrentText(prev)
+        self.combo_social_model.blockSignals(False)
+
+    def _on_social_model_mode_changed(self) -> None:
+        if not hasattr(self, "combo_social_model_source"):
+            return
+        use_other = self.combo_social_model_source.currentIndex() == 1
+        self.lbl_social_model.setVisible(use_other)
+        self.combo_social_model.setVisible(use_other)
+        self.combo_social_model.setEnabled(use_other)
+
+    def _apply_social_package_controls_state(self) -> None:
+        """Sub-opções do pacote social só fazem sentido quando o pacote está ativado."""
+        if not hasattr(self, "chk_enable_social_package"):
+            return
+        on = self.chk_enable_social_package.isChecked()
+        self.lbl_social_pack.setEnabled(on)
+        self.combo_social_model_source.setEnabled(on)
+        self.chk_social_cover.setEnabled(on)
+        lbl_hint = getattr(self, "lbl_social_hint", None)
+        if lbl_hint is not None:
+            lbl_hint.setEnabled(on)
+        if not on:
+            self.lbl_social_model.setEnabled(False)
+            self.combo_social_model.setEnabled(False)
+        else:
+            self._on_social_model_mode_changed()
+
     def _on_provider_changed(self) -> None:
-        self._sync_llm_model_options()
-        self.edit_api_key.setEnabled(self._current_llm_provider() == "gemini")
+        use_key = self._uses_cloud_api_key()
+        self.edit_api_key.setEnabled(use_key)
+        self.combo_api_profile.setEnabled(use_key)
+        self.btn_api_key_save.setEnabled(use_key)
+        self.btn_api_key_remove.setEnabled(use_key)
+        self.lbl_api_profile.setEnabled(use_key)
+        self.lbl_api_key_row.setEnabled(use_key)
+        prov = self._current_llm_provider()
+        if prov == "gemini":
+            self.lbl_api_key_row.setText("Chave API (Gemini)")
+        elif prov == "groq":
+            self.lbl_api_key_row.setText("Chave API (Groq)")
+        else:
+            self.lbl_api_key_row.setText("Chave API")
+        # Carregar perfil/chave antes de pedir listas à API (Gemini / Groq).
+        self._refresh_api_profile_combo()
+        if self._current_llm_provider() not in ("gemini", "groq"):
+            self._sync_llm_model_options()
         self._refresh_status_bar()
+
+    def _refresh_api_profile_combo(self) -> None:
+        if not hasattr(self, "combo_api_profile"):
+            return
+        self.combo_api_profile.blockSignals(True)
+        self.combo_api_profile.clear()
+        self.combo_api_profile.addItem("(Colar manualmente — sem perfil guardado)", None)
+        prov = self._current_llm_provider()
+        for p in self._api_key_store.list_for_provider(prov):
+            self.combo_api_profile.addItem(p.label, p.id)
+        last = self._api_key_store.last_profile_id(prov) if prov in ("gemini", "groq") else None
+        sel = 0
+        if last:
+            for i in range(self.combo_api_profile.count()):
+                if self.combo_api_profile.itemData(i) == last:
+                    sel = i
+                    break
+        self.combo_api_profile.setCurrentIndex(sel)
+        self.combo_api_profile.blockSignals(False)
+        if sel > 0:
+            self._on_api_profile_changed(sel)
+        elif self._uses_cloud_api_key():
+            # Manual com API na nuvem: respeitar limpeza do último perfil
+            self._on_api_profile_changed(0)
+        # Com Ollama e índice 0, não chamar — não limpa último perfil Gemini/Groq guardado
+
+    def _on_api_profile_changed(self, index: int) -> None:
+        if index < 0 or not hasattr(self, "combo_api_profile"):
+            return
+        pid = self.combo_api_profile.itemData(index)
+        prov = self._current_llm_provider()
+        if pid is None:
+            if prov in ("gemini", "groq"):
+                self._api_key_store.set_last_for_provider(prov, None)
+            if self._uses_cloud_api_key():
+                self._sync_llm_model_options()
+            return
+        prof = self._api_key_store.get(str(pid))
+        if prof:
+            self._api_key_store.set_last_for_provider(prof.provider, prof.id)
+            self.edit_api_key.blockSignals(True)
+            self.edit_api_key.setText(prof.secret)
+            self.edit_api_key.blockSignals(False)
+            if prof.provider in ("gemini", "groq") and self._current_llm_provider() == prof.provider:
+                self._sync_llm_model_options()
+
+    def _open_save_api_key_dialog(self) -> None:
+        prov = self._current_llm_provider()
+        default_lbl = "Chave API Groq" if prov == "groq" else "Chave API Gemini"
+        dlg = SaveApiKeyDialog(
+            self,
+            default_provider=prov if prov in ("gemini", "groq") else "gemini",
+            default_label=default_lbl,
+            default_secret=self.edit_api_key.text().strip(),
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+        label = dlg.profile_label() or default_lbl
+        secret = dlg.secret()
+        if not secret:
+            QMessageBox.warning(self, "Chave vazia", "Informe a chave antes de guardar.")
+            return
+        try:
+            prof = self._api_key_store.add(label, dlg.provider_id(), secret)
+        except ValueError as e:
+            QMessageBox.warning(self, "Erro", str(e))
+            return
+        self._refresh_api_profile_combo()
+        for i in range(self.combo_api_profile.count()):
+            if self.combo_api_profile.itemData(i) == prof.id:
+                self.combo_api_profile.setCurrentIndex(i)
+                break
+        self.update_log(f"[*] Perfil de chave guardado: {prof.label} ({prof.provider})")
+
+    def _remove_selected_api_profile(self) -> None:
+        idx = self.combo_api_profile.currentIndex()
+        pid = self.combo_api_profile.itemData(idx)
+        if pid is None:
+            QMessageBox.information(
+                self,
+                "Remover perfil",
+                "Selecione um perfil guardado na lista (não a opção manual).",
+            )
+            return
+        prof = self._api_key_store.get(str(pid))
+        name = prof.label if prof else str(pid)
+        if (
+            QMessageBox.question(
+                self,
+                "Remover perfil",
+                f"Remover o perfil «{name}» do disco?",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._api_key_store.remove(str(pid))
+        self._refresh_api_profile_combo()
+        self.update_log(f"[*] Perfil de chave removido: {name}")
 
     def _get_available_models(self) -> List[str]:
         try:
@@ -222,6 +496,7 @@ class ViralApp(QMainWindow):
         prov = self._current_llm_provider() if hasattr(self, "combo_provider") else "ollama"
         ia_line = {
             "gemini": "IA: Gemini (API)",
+            "groq": "IA: Groq (API)",
             "transformers": "IA: Transformers (local)",
         }.get(prov, "IA: Ollama (local)")
 
@@ -348,7 +623,7 @@ class ViralApp(QMainWindow):
         lbl_provider.setStyleSheet("color: #aaaaaa;")
         self.combo_provider = QComboBox()
         self.combo_provider.addItems(
-            ["Local (Ollama)", "API (Gemini)", "Local (Transformers)"]
+            ["Local (Ollama)", "API (Gemini)", "API (Groq)", "Local (Transformers)"]
         )
         self.combo_provider.setCurrentText("Local (Ollama)")
         self.combo_provider.setMinimumHeight(32)
@@ -357,20 +632,45 @@ class ViralApp(QMainWindow):
         self.lbl_model.setStyleSheet("color: #aaaaaa;")
         self.combo_model = QComboBox()
         self.combo_model.setMinimumHeight(32)
-        lbl_api_key = QLabel("Gemini API Key")
-        lbl_api_key.setStyleSheet("color: #aaaaaa;")
+        self.lbl_api_profile = QLabel("Perfil de chave guardada")
+        self.lbl_api_profile.setStyleSheet("color: #aaaaaa;")
+        self.combo_api_profile = QComboBox()
+        self.combo_api_profile.setMinimumHeight(32)
+        self.combo_api_profile.setToolTip(
+            "Mostra só os perfis guardados para o provedor selecionado (Gemini ou Groq). "
+            "No Windows o ficheiro fica em AppData\\Local\\AI_Viral_Clipper\\api_keys.json."
+        )
+        self.btn_api_key_save = QPushButton("Guardar…")
+        self.btn_api_key_save.setToolTip("Guardar a chave do campo abaixo com um nome na lista.")
+        self.btn_api_key_save.clicked.connect(self._open_save_api_key_dialog)
+        self.btn_api_key_remove = QPushButton("Remover")
+        self.btn_api_key_remove.setToolTip("Apaga o perfil selecionado do disco.")
+        self.btn_api_key_remove.clicked.connect(self._remove_selected_api_profile)
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(self.combo_api_profile, stretch=1)
+        profile_row.addWidget(self.btn_api_key_save)
+        profile_row.addWidget(self.btn_api_key_remove)
+        profile_wrap = QWidget()
+        profile_wrap.setLayout(profile_row)
+
+        self.lbl_api_key_row = QLabel("Chave API")
+        self.lbl_api_key_row.setStyleSheet("color: #aaaaaa;")
         self.edit_api_key = QLineEdit()
         self.edit_api_key.setEchoMode(QLineEdit.Password)
-        self.edit_api_key.setPlaceholderText("Cole sua chave ao usar API (Gemini)")
+        self.edit_api_key.setPlaceholderText("Cole a chave ou escolha um perfil guardado")
         self.edit_api_key.setMinimumHeight(32)
         self.edit_api_key.setEnabled(False)
         self.edit_api_key.textChanged.connect(lambda _t: self._sync_llm_model_options())
+        self.combo_api_profile.currentIndexChanged.connect(self._on_api_profile_changed)
+
         ai_form.addWidget(lbl_provider, 0, 0, Qt.AlignRight)
         ai_form.addWidget(self.combo_provider, 0, 1)
         ai_form.addWidget(self.lbl_model, 1, 0, Qt.AlignRight)
         ai_form.addWidget(self.combo_model, 1, 1)
-        ai_form.addWidget(lbl_api_key, 2, 0, Qt.AlignRight | Qt.AlignTop)
-        ai_form.addWidget(self.edit_api_key, 2, 1)
+        ai_form.addWidget(self.lbl_api_profile, 2, 0, Qt.AlignRight | Qt.AlignTop)
+        ai_form.addWidget(profile_wrap, 2, 1)
+        ai_form.addWidget(self.lbl_api_key_row, 3, 0, Qt.AlignRight | Qt.AlignTop)
+        ai_form.addWidget(self.edit_api_key, 3, 1)
         gb_ai.setLayout(ai_form)
         adv_layout.addWidget(gb_ai)
 
@@ -390,7 +690,7 @@ class ViralApp(QMainWindow):
         self.combo_whisper_device.addItems(
             ["Auto (recomendado)", "CPU (estável)", "GPU CUDA (rápido)"]
         )
-        self.combo_whisper_device.setCurrentText("Auto (recomendado)")
+        self.combo_whisper_device.setCurrentText("CPU (estável)")
         self.combo_whisper_device.setMinimumHeight(32)
         whisper_form.addWidget(lbl_whisper_model, 0, 0, Qt.AlignRight)
         whisper_form.addWidget(self.combo_whisper_model, 0, 1)
@@ -463,14 +763,77 @@ class ViralApp(QMainWindow):
         adv_layout.addWidget(gb_export)
         adv_layout.addStretch()
 
+        # ---------- Aba Pacote Social ----------
+        tab_social = QWidget()
+        social_layout = QVBoxLayout(tab_social)
+        social_layout.setSpacing(14)
+
+        gb_social = QGroupBox("Capa + descrição para redes")
+        social_form = QVBoxLayout()
+        self.chk_enable_social_package = QCheckBox(
+            "Gerar pacote social após renderizar os clipes"
+        )
+        self.chk_enable_social_package.setChecked(True)
+        self.chk_enable_social_package.setToolTip(
+            "Se desativar, o fluxo termina só com os vídeos dos clipes — sem IA extra, "
+            "sem contexto narrativo longo e sem ficheiros clip_N_social / capa."
+        )
+        self.chk_enable_social_package.toggled.connect(self._apply_social_package_controls_state)
+
+        self.lbl_social_pack = QLabel("Modelo de IA para pacote social")
+        self.lbl_social_pack.setStyleSheet("color: #aaaaaa;")
+        self.combo_social_model_source = QComboBox()
+        self.combo_social_model_source.addItems(
+            [
+                "Usar o mesmo modelo da análise",
+                "Escolher outro modelo (capa e descrição)",
+            ]
+        )
+        self.combo_social_model_source.setMinimumHeight(32)
+        self.combo_social_model_source.setToolTip(
+            "Define qual modelo gera a frase de impacto e a descrição após os clipes serem renderizados."
+        )
+        self.combo_social_model_source.currentIndexChanged.connect(
+            self._on_social_model_mode_changed
+        )
+
+        self.lbl_social_model = QLabel("Modelo alternativo (mesmo provedor)")
+        self.lbl_social_model.setStyleSheet("color: #aaaaaa;")
+        self.combo_social_model = QComboBox()
+        self.combo_social_model.setMinimumHeight(32)
+
+        self.lbl_social_hint = QLabel(
+            "Com o pacote ativo: após os clipes, a IA usa o contexto de toda a fala do vídeo "
+            "até ao fim de cada clipe para o título e a descrição."
+        )
+        self.lbl_social_hint.setStyleSheet("color: #888888; font-size: 11px;")
+        self.chk_social_cover = QCheckBox("Gerar imagem de capa (JPG)")
+        self.chk_social_cover.setChecked(True)
+        self.chk_social_cover.setToolTip(
+            "Se desmarcar, só são gerados o texto social (clip_N_social.txt), sem clip_N_capa.jpg."
+        )
+
+        social_form.addWidget(self.chk_enable_social_package)
+        social_form.addWidget(self.lbl_social_pack)
+        social_form.addWidget(self.combo_social_model_source)
+        social_form.addWidget(self.lbl_social_model)
+        social_form.addWidget(self.combo_social_model)
+        social_form.addWidget(self.chk_social_cover)
+        social_form.addWidget(self.lbl_social_hint)
+        gb_social.setLayout(social_form)
+        social_layout.addWidget(gb_social)
+        social_layout.addStretch()
+
         scroll.setWidget(scroll_content)
         adv_outer.addWidget(scroll)
 
         self.tabs.addTab(tab_basic, "Essencial")
         self.tabs.addTab(tab_adv, "Avançado / Ajustes finos")
+        self.tabs.addTab(tab_social, "Pacote Social")
         main_layout.addWidget(self.tabs)
 
-        self._sync_llm_model_options()
+        self._apply_social_package_controls_state()
+        self._on_provider_changed()
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
@@ -688,10 +1051,40 @@ class ViralApp(QMainWindow):
                 self.btn_action.setText("Selecionar Modelo Válido")
                 return
 
+        social_same = self.combo_social_model_source.currentIndex() == 0
+        social_model_pick = self.combo_social_model.currentText().strip()
+        enable_social = self.chk_enable_social_package.isChecked()
+        if enable_social and provider_selected == "ollama" and not social_same:
+            available_models = self._get_available_models()
+            if social_model_pick not in available_models:
+                self.update_log(
+                    f"[!] ERRO: Modelo social '{social_model_pick}' não encontrado no Ollama."
+                )
+                self.update_log(f"[!] Modelos disponíveis: {', '.join(available_models)}")
+                self._unlock_ui_after_process()
+                self.btn_action.setText("Selecionar modelo social válido")
+                return
+
         self.update_log(f"[*] Provedor selecionado: {provider_selected.upper()}")
         self.update_log(f"[*] Iniciando motor com IA: {model_selected.upper()}")
-        if provider_selected == "gemini" and not self.edit_api_key.text().strip():
-            self.update_log("[!] ERRO: Informe a Gemini API Key para usar provedor API.")
+        if enable_social:
+            if social_same:
+                self.update_log("[*] Pacote social: mesmo modelo da análise")
+            else:
+                self.update_log(
+                    f"[*] Pacote social: modelo alternativo — {social_model_pick or '(vazio)'}"
+                )
+            self.update_log(
+                f"[*] Capa JPG (Pacote Social): {'ATIVADA' if self.chk_social_cover.isChecked() else 'DESATIVADA'}"
+            )
+        else:
+            self.update_log(
+                "[*] Pacote social: DESATIVADO — só análise, transcrição e render dos clipes."
+            )
+        if provider_selected in ("gemini", "groq") and not self.edit_api_key.text().strip():
+            self.update_log(
+                "[!] ERRO: Informe a chave API (Gemini ou Groq) ou escolha um perfil guardado."
+            )
             self._unlock_ui_after_process()
             self.btn_action.setText("Informar API Key")
             return
@@ -716,10 +1109,17 @@ class ViralApp(QMainWindow):
         self.combo_provider.setEnabled(False)
         self.combo_model.setEnabled(False)
         self.edit_api_key.setEnabled(False)
+        self.combo_api_profile.setEnabled(False)
+        self.btn_api_key_save.setEnabled(False)
+        self.btn_api_key_remove.setEnabled(False)
         self.combo_whisper_model.setEnabled(False)
         self.combo_whisper_device.setEnabled(False)
         self.combo_prompt.setEnabled(False)
         self.drop_zone.setEnabled(False)
+        self.chk_enable_social_package.setEnabled(False)
+        self.combo_social_model_source.setEnabled(False)
+        self.combo_social_model.setEnabled(False)
+        self.chk_social_cover.setEnabled(False)
 
         self.progress_bar.setProperty("state", "normal")
         self.progress_bar.setVisible(True)
@@ -749,6 +1149,10 @@ class ViralApp(QMainWindow):
                 if self.edit_custom_prompt.toPlainText().strip()
                 else None
             ),
+            social_use_same_model=social_same,
+            social_model_name=social_model_pick if not social_same else None,
+            generate_social_cover=self.chk_social_cover.isChecked(),
+            enable_social_package=enable_social,
         )
         self.worker.progress_signal.connect(self.update_log)
         self.worker.finished_signal.connect(self.on_finished)
@@ -827,11 +1231,19 @@ class ViralApp(QMainWindow):
         self.tabs.setEnabled(True)
         self.combo_provider.setEnabled(True)
         self.combo_model.setEnabled(True)
-        self.edit_api_key.setEnabled(self._current_llm_provider() == "gemini")
+        use_key = self._uses_cloud_api_key()
+        self.edit_api_key.setEnabled(use_key)
+        self.combo_api_profile.setEnabled(use_key)
+        self.btn_api_key_save.setEnabled(use_key)
+        self.btn_api_key_remove.setEnabled(use_key)
+        self.lbl_api_profile.setEnabled(use_key)
+        self.lbl_api_key_row.setEnabled(use_key)
         self.combo_whisper_model.setEnabled(True)
         self.combo_whisper_device.setEnabled(True)
         self.combo_prompt.setEnabled(True)
         self.drop_zone.setEnabled(True)
+        self.chk_enable_social_package.setEnabled(True)
+        self._apply_social_package_controls_state()
 
     def reset_ui_for_new_video(self) -> None:
         self.current_video_path = None

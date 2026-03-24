@@ -10,6 +10,8 @@ import ollama
 from app.core.config import DEFAULT_LLM_MODEL
 from app.core.logger import logger
 
+GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 # Reforça alinhamento aos timestamps reais do Whisper (reduz alucinação de segundos).
 _TIMESTAMP_RULE = """
     REGRA DE TIMESTAMPS (OBRIGATÓRIA): Os valores de "start" e "end" DEVEM ser tempos que
@@ -178,6 +180,91 @@ def _extract_json_array(raw_content: str) -> List[Dict[str, Any]]:
     return json.loads(match.group(0).strip())
 
 
+def _extract_json_object(raw_content: str) -> Dict[str, Any]:
+    match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+    if not match:
+        return {}
+    return json.loads(match.group(0).strip())
+
+
+def _groq_chat_completion(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    json_object: bool = False,
+) -> str:
+    try:
+        import httpx
+    except ImportError as e:
+        raise RuntimeError(
+            "Pacote 'httpx' não instalado. Execute: pip install httpx"
+        ) from e
+
+    key = (api_key or "").strip() or os.environ.get("GROQ_API_KEY", "")
+    if not key:
+        raise RuntimeError("Chave API Groq em falta (campo na app ou GROQ_API_KEY).")
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    body: Dict[str, Any] = {
+        "model": model_to_use,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if json_object:
+        body["response_format"] = {"type": "json_object"}
+
+    with httpx.Client(timeout=120.0) as client:
+        resp = client.post(GROQ_CHAT_COMPLETIONS_URL, headers=headers, json=body)
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = resp.text[:500]
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(f"Groq API HTTP {resp.status_code}: {detail}") from e
+        data = resp.json()
+
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("Resposta Groq sem choices.")
+    msg = choices[0].get("message") or {}
+    content = msg.get("content")
+    if not isinstance(content, str):
+        raise RuntimeError("Resposta Groq sem texto.")
+    return content
+
+
+def _analyze_with_groq(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str | None = None,
+) -> List[Dict[str, Any]]:
+    raw = _groq_chat_completion(
+        system_prompt,
+        user_prompt,
+        model_to_use,
+        (api_key or "").strip(),
+        temperature=0.1,
+        max_tokens=8192,
+        json_object=False,
+    )
+    return _extract_json_array(raw)
+
+
 def _analyze_with_ollama(
     system_prompt: str,
     user_prompt: str,
@@ -191,7 +278,7 @@ def _analyze_with_ollama(
         ],
         format="json",
         options={
-            "num_ctx": 2048,
+            "num_ctx": 4096,
             "temperature": 0.1,
             "top_p": 0.9,
         },
@@ -287,6 +374,8 @@ def analyze_viral_potential(
     try:
         if provider == "gemini":
             return _analyze_with_gemini(system_prompt, user_prompt, model_to_use, api_key)
+        if provider == "groq":
+            return _analyze_with_groq(system_prompt, user_prompt, model_to_use, api_key)
         if provider == "transformers":
             return _analyze_with_transformers(
                 system_prompt,
@@ -304,4 +393,182 @@ def analyze_viral_potential(
     except Exception as e:  # noqa: BLE001
         logger.error("Falha ao extrair clipes deste capítulo: %s", e)
         return []
+
+
+def generate_social_package(
+    narrative_context: str,
+    clip_text: str,
+    clip_start: float,
+    clip_end: float,
+    model_name: str | None,
+    provider: str = "ollama",
+    api_key: str | None = None,
+    max_new_tokens: int | None = None,
+) -> Dict[str, Any]:
+    """
+    Gera conteúdo social para um clipe já criado:
+    - frase de impacto curta para capa
+    - descrição para redes sociais
+    - segundo relativo ideal para o frame da capa
+
+    ``narrative_context``: transcrição do vídeo desde o início até o fim deste clipe
+    (tempos absolutos), para o título fazer sentido no enredo.
+    ``clip_text``: apenas o trecho do clipe, para ancorar o frame_second.
+    """
+    narrative = (narrative_context or "").strip()
+    if not narrative:
+        narrative = "Sem transcrição acumulada disponível."
+    safe_clip = (clip_text or "").strip()
+    if not safe_clip:
+        safe_clip = "Sem transcrição detalhada apenas do clipe."
+
+    duration = max(0.5, float(clip_end) - float(clip_start))
+    model_to_use = model_name or DEFAULT_LLM_MODEL
+    provider = provider.strip().lower()
+
+    system_prompt = (
+        "Você é um estrategista de conteúdo para TikTok e Shorts. "
+        "Responda APENAS com JSON válido."
+    )
+    user_prompt = f"""
+    Tarefa: gerar pacote social para um clipe já renderizado.
+
+    CONTEXTO NARRATIVO (transcrição do vídeo ORIGINAL desde o início até o fim deste clipe,
+    tempos absolutos em segundos — use isto para o título e a descrição fazerem sentido no conjunto):
+    ---
+    {narrative}
+    ---
+
+    Trecho APENAS deste clipe (referência para escolher o melhor instante visual):
+    ---
+    {safe_clip}
+    ---
+
+    DADOS:
+    - início absoluto do clipe: {clip_start:.2f}s
+    - fim absoluto do clipe: {clip_end:.2f}s
+    - duração do clipe: {duration:.2f}s
+
+    REGRAS:
+    1) hook_phrase: frase curta e forte (máx. 90 caracteres), em português, sem emojis.
+       Deve refletir o CONTEXTO NARRATIVO acima, não só as últimas frases do clipe.
+    2) description: texto para redes sociais (2-4 linhas), com CTA de engajamento, alinhado ao contexto.
+    3) frame_second: segundo RELATIVO dentro do clipe para tirar a capa.
+       Deve estar entre 0 e {max(0.5, duration - 0.1):.2f}.
+    4) Não invente fatos fora da transcrição.
+    5) Retorne apenas este JSON:
+    {{
+      "hook_phrase": "texto",
+      "description": "texto",
+      "frame_second": 12.3
+    }}
+    """
+
+    fallback = {
+        "hook_phrase": "O momento que muda tudo",
+        "description": (
+            "Assista até o final e me diga se você concorda com esse ponto.\n"
+            "Comenta sua opinião e compartilha com quem precisa ver isso."
+        ),
+        "frame_second": round(min(max(duration * 0.45, 0.0), max(0.0, duration - 0.1)), 2),
+    }
+
+    try:
+        if provider == "gemini":
+            import google.generativeai as genai
+
+            api_key_to_use = (api_key or "").strip() or os.environ.get("GOOGLE_API_KEY")
+            if not api_key_to_use:
+                return fallback
+            genai.configure(api_key=api_key_to_use)
+            model = genai.GenerativeModel(model_to_use)
+            response = model.generate_content(
+                f"{system_prompt}\n\n{user_prompt}",
+                generation_config={"temperature": 0.2, "top_p": 0.9},
+            )
+            raw_content = getattr(response, "text", "") or ""
+            obj = _extract_json_object(raw_content)
+        elif provider == "groq":
+            try:
+                raw_content = _groq_chat_completion(
+                    system_prompt,
+                    user_prompt,
+                    model_to_use,
+                    (api_key or "").strip(),
+                    temperature=0.2,
+                    max_tokens=4096,
+                    json_object=True,
+                )
+            except Exception:  # noqa: BLE001
+                raw_content = _groq_chat_completion(
+                    system_prompt,
+                    user_prompt,
+                    model_to_use,
+                    (api_key or "").strip(),
+                    temperature=0.2,
+                    max_tokens=4096,
+                    json_object=False,
+                )
+            obj = _extract_json_object(raw_content)
+        elif provider == "transformers":
+            try:
+                import torch
+                from transformers import pipeline
+            except ImportError:
+                return fallback
+
+            pipe = _HF_PIPELINE_CACHE.get(model_to_use)
+            if pipe is None:
+                pipe = pipeline(
+                    "text-generation",
+                    model=model_to_use,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                    device_map="auto",
+                )
+                _HF_PIPELINE_CACHE[model_to_use] = pipe
+
+            prompt = f"{system_prompt}\n\n{user_prompt}\n\nRetorne apenas JSON válido."
+            response = pipe(
+                prompt,
+                max_new_tokens=max(64, min(int(max_new_tokens or 260), 1024)),
+                do_sample=False,
+                temperature=0.2,
+            )
+            raw_content = ""
+            if isinstance(response, list) and response:
+                raw_content = str(response[0].get("generated_text", ""))
+            obj = _extract_json_object(raw_content)
+        else:
+            response = ollama.chat(
+                model=model_to_use,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                format="json",
+                options={
+                    "num_ctx": 8192,
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                },
+            )
+            raw_content = response["message"]["content"]
+            obj = _extract_json_object(raw_content)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Falha ao gerar pacote social via IA: %s", e)
+        return fallback
+
+    hook = str(obj.get("hook_phrase", "")).strip() or fallback["hook_phrase"]
+    description = str(obj.get("description", "")).strip() or fallback["description"]
+    try:
+        frame_second = float(obj.get("frame_second", fallback["frame_second"]))
+    except Exception:  # noqa: BLE001
+        frame_second = float(fallback["frame_second"])
+    frame_second = max(0.0, min(frame_second, max(0.0, duration - 0.1)))
+
+    return {
+        "hook_phrase": hook[:140],
+        "description": description,
+        "frame_second": round(frame_second, 2),
+    }
 

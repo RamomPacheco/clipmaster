@@ -55,6 +55,17 @@ EXPORTS_ROOT = PROJECT_ROOT / "exports"
 # Arquivo de histórico de processamento
 PROCESSING_HISTORY_FILE = PROJECT_ROOT / "processing_history.json"
 
+
+def api_keys_storage_path() -> Path:
+    """Ficheiro JSON com perfis de chaves API (nome + provedor + segredo)."""
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    else:
+        base = Path.home() / ".local" / "share"
+    d = base / "AI_Viral_Clipper"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "api_keys.json"
+
 # Parâmetros de clipes
 MIN_CLIP_SECONDS = 30.0
 MAX_CLIP_SECONDS = 60.0
@@ -65,7 +76,7 @@ CHUNK_SECONDS = 600.0
 CHUNK_OVERLAP_SECONDS = 45.0
 
 # Faster-Whisper — qualidade de timestamp e texto
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_DEVICE = whisper_device_effective()
 WHISPER_COMPUTE_TYPE = (
     os.environ.get("WHISPER_COMPUTE_TYPE")

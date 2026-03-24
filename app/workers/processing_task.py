@@ -15,9 +15,9 @@ from app.services.clip_manager import (
     remove_duplicate_clips,
     snap_clips_to_transcript,
 )
-from app.services.llm_analyzer import analyze_viral_potential
+from app.services.llm_analyzer import analyze_viral_potential, generate_social_package
 from app.services.transcription import transcribe_audio
-from app.services.video_engine import extract_safe_audio, render_clips
+from app.services.video_engine import create_social_cover, extract_safe_audio, render_clips
 
 
 class VideoProcessorThread(QThread):
@@ -49,6 +49,10 @@ class VideoProcessorThread(QThread):
         bitrate: str = "",
         llm_max_new_tokens: int | None = None,
         custom_prompt: Optional[str] = None,
+        social_use_same_model: bool = True,
+        social_model_name: Optional[str] = None,
+        generate_social_cover: bool = True,
+        enable_social_package: bool = True,
     ) -> None:
         super().__init__()
         self.video_path = Path(video_path)
@@ -72,6 +76,10 @@ class VideoProcessorThread(QThread):
         self.bitrate = bitrate
         self.llm_max_new_tokens = llm_max_new_tokens
         self.custom_prompt = custom_prompt
+        self.social_use_same_model = social_use_same_model
+        self.social_model_name = (social_model_name or "").strip() or None
+        self.generate_social_cover = generate_social_cover
+        self.enable_social_package = enable_social_package
 
         self.metrics = ProcessingMetrics(
             model_used=model_name,
@@ -88,6 +96,47 @@ class VideoProcessorThread(QThread):
             )
             return False
         return True
+
+    def _build_clip_transcript_text(self, clip: Clip, segments: list[dict]) -> str:
+        lines: list[str] = []
+        for seg in segments:
+            s0 = float(seg.get("start", 0.0))
+            s1 = float(seg.get("end", 0.0))
+            if s1 <= clip.start or s0 >= clip.end:
+                continue
+            txt = str(seg.get("text", "")).strip()
+            if not txt:
+                continue
+            lines.append(f"[{s0:.2f}s - {s1:.2f}s] {txt}")
+        return "\n".join(lines)
+
+    def _build_narrative_context_up_to(
+        self,
+        segments: list[dict],
+        until_abs: float,
+        max_chars: int = 28000,
+    ) -> str:
+        """
+        Transcrição acumulada do vídeo original desde o início até ``until_abs`` (ex.: fim do clipe).
+        Se exceder ``max_chars``, mantém apenas o final (mais próximo do momento do clipe).
+        """
+        ordered = sorted(segments, key=lambda s: float(s.get("start", 0.0)))
+        lines: list[str] = []
+        for seg in ordered:
+            s0 = float(seg.get("start", 0.0))
+            s1 = float(seg.get("end", 0.0))
+            if s1 <= 0.0:
+                continue
+            if s0 >= until_abs:
+                break
+            txt = str(seg.get("text", "")).strip()
+            if not txt:
+                continue
+            lines.append(f"[{s0:.2f}s - {s1:.2f}s] {txt}")
+        full = "\n".join(lines)
+        if len(full) <= max_chars:
+            return full
+        return full[-max_chars:]
 
     # ----------------------
     # Pipeline principal
@@ -267,6 +316,83 @@ class VideoProcessorThread(QThread):
 
             self.metrics.rendering_time = time.time() - rendering_start
             self.metrics.clips_selected = len(self.selected_clips)
+
+            # Fase 6 - pacote social (só se ativado na UI; senão pipeline termina após render)
+            if self.enable_social_package:
+                social_model = (
+                    self.model_name
+                    if self.social_use_same_model
+                    else (self.social_model_name or self.model_name)
+                )
+                self.progress_signal.emit(
+                    "Gerando pacote social dos clipes (modelo: "
+                    f"{social_model}"
+                    + (" — com capa JPG." if self.generate_social_cover else " — sem capa JPG.")
+                )
+                for i, clip in enumerate(self.selected_clips, start=1):
+                    clip_text = self._build_clip_transcript_text(clip, segments)
+                    narrative = self._build_narrative_context_up_to(
+                        segments, until_abs=float(clip.end)
+                    )
+                    social = generate_social_package(
+                        narrative_context=narrative,
+                        clip_text=clip_text,
+                        clip_start=float(clip.start),
+                        clip_end=float(clip.end),
+                        model_name=social_model,
+                        provider=self.llm_provider,
+                        api_key=self.llm_api_key,
+                        max_new_tokens=self.llm_max_new_tokens,
+                    )
+
+                    hook = str(social.get("hook_phrase", "")).strip() or clip.headline
+                    description = str(social.get("description", "")).strip() or clip.reason
+                    frame_second_rel = float(
+                        social.get("frame_second", max(0.0, clip.duration * 0.45))
+                    )
+                    frame_second_rel = max(
+                        0.0, min(frame_second_rel, max(0.0, float(clip.duration) - 0.1))
+                    )
+                    frame_second_abs = float(clip.start) + frame_second_rel
+
+                    cover_line: str
+                    if self.generate_social_cover:
+                        cover_path = create_social_cover(
+                            video_path=self.video_path,
+                            output_dir=self.output_dir,
+                            clip_index=i,
+                            frame_second_abs=frame_second_abs,
+                            hook_phrase=hook,
+                            resolution=self.resolution,
+                            export_quality=self.export_quality,
+                            aspect_ratio=self.aspect_ratio,
+                            framing_mode=self.framing_mode,
+                            clip=clip,
+                        )
+                        cover_line = cover_path.name
+                        cover_log = cover_path.name
+                    else:
+                        cover_line = "(capa desativada na aba Pacote Social)"
+                        cover_log = "sem capa"
+
+                    social_path = self.output_dir / f"clip_{i}_social.txt"
+                    social_path.write_text(
+                        (
+                            f"Clipe: clip_{i}_viral.mp4\n"
+                            f"Capa: {cover_line}\n"
+                            f"Frase de impacto: {hook}\n\n"
+                            "Descrição para redes:\n"
+                            f"{description}\n"
+                        ),
+                        encoding="utf-8",
+                    )
+                    self.progress_signal.emit(
+                        f"Pacote social do clipe {i} pronto ({cover_log} + {social_path.name})."
+                    )
+            else:
+                self.progress_signal.emit(
+                    "Pacote social desativado: sem contexto narrativo extra, capa nem ficheiros social."
+                )
 
             append_history_entry(self.metrics, self.video_path)
 
