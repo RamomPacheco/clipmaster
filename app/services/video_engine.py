@@ -7,7 +7,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.core.logger import logger
-from app.models.schemas import Clip
+from app.models.schemas import Clip, SocialCoverStyle, TiktokCaptionStyle
 
 PROFILE_MAP = {
     "SD (720p)": {"preset": "veryfast", "crf": "24", "height": 720},
@@ -39,30 +39,66 @@ def tiktok_subtitle_style_sizes(target_w: int, target_h: int) -> tuple[int, int]
     return style_font_size, style_margin_v
 
 
-def tiktok_ass_v4_style_block(target_w: int, target_h: int) -> str:
-    """Bloco [V4+ Styles] (Format + Style Default) idêntico ao dos clipes com legenda."""
-    fs, mv = tiktok_subtitle_style_sizes(target_w, target_h)
+def tiktok_ass_v4_style_block(
+    target_w: int,
+    target_h: int,
+    style: Optional[TiktokCaptionStyle] = None,
+) -> str:
+    """Bloco [V4+ Styles] (Format + Style Default) dos clipes com legenda TikTok."""
+    fs_base, mv_base = tiktok_subtitle_style_sizes(target_w, target_h)
+    if style is None:
+        return (
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            f"Style: Default,Arial,{fs_base},&H00FFFFFF,&H0000E5FF,&H00101010,&H80000000,1,0,0,0,"
+            f"100,100,0,0,1,4,1,2,80,80,{mv_base},1"
+        )
+    fs = style.font_size if style.font_size and style.font_size > 0 else fs_base
+    mv = style.margin_v if style.margin_v and style.margin_v > 0 else mv_base
+    b_flag = -1 if style.bold else 0
+    i_flag = -1 if style.italic else 0
+    ff = (style.font_family or "Arial").replace(",", " ")
     return (
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,Arial,{fs},&H00FFFFFF,&H0000E5FF,&H00101010,&H80000000,1,0,0,0,"
-        f"100,100,0,0,1,4,1,2,80,80,{mv},1"
+        f"Style: Default,{ff},{fs},{style.primary_color_ass},{style.secondary_color_ass},"
+        f"{style.outline_color_ass},&H80000000,{b_flag},{i_flag},0,0,{style.scale_x},{style.scale_y},0,0,1,"
+        f"{style.outline},{style.shadow},2,80,80,{mv},1"
     )
 
 
-def tiktok_cover_ass_v4_style_block(target_w: int, target_h: int) -> str:
+def tiktok_cover_ass_v4_style_block(
+    target_w: int,
+    target_h: int,
+    style: Optional[SocialCoverStyle] = None,
+) -> str:
     """
-    Estilo da capa: mesma família tipográfica/tamanho-base das legendas, com cor de destaque
-    (amarelo-ouro), negrito e contorno/sombra mais fortes para thumbnail.
+    Estilo da capa: padrão histórico (amarelo-ouro, negrito, contorno forte).
+    Com ``style`` preenchido (personalização na UI), usa esses campos.
     """
-    fs, mv = tiktok_subtitle_style_sizes(target_w, target_h)
+    fs_base, mv_base = tiktok_subtitle_style_sizes(target_w, target_h)
+    if style is None:
+        return (
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            f"Style: Cover,Arial,{fs_base},&H0000D7FF,&H0000E5FF,&H00000000,&H80000000,-1,0,0,0,"
+            f"102,102,0,0,1,6,3,2,80,80,{mv_base},1"
+        )
+    fs = style.font_size if style.font_size and style.font_size > 0 else fs_base
+    mv = style.margin_v if style.margin_v and style.margin_v > 0 else mv_base
+    b_flag = -1 if style.bold else 0
+    i_flag = -1 if style.italic else 0
+    ff = (style.font_family or "Arial").replace(",", " ")
     return (
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
         "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
         "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Cover,Arial,{fs},&H0000D7FF,&H0000E5FF,&H00000000,&H80000000,-1,0,0,0,"
-        f"102,102,0,0,1,6,3,2,80,80,{mv},1"
+        f"Style: Cover,{ff},{fs},{style.primary_color_ass},{style.secondary_color_ass},"
+        f"{style.outline_color_ass},&H80000000,{b_flag},{i_flag},0,0,{style.scale_x},{style.scale_y},0,0,1,"
+        f"{style.outline},{style.shadow},2,80,80,{mv},1"
     )
 
 
@@ -471,6 +507,56 @@ def build_framing_vf(
     )
 
 
+def export_preview_frame_png_bytes(
+    video_path: Path,
+    *,
+    resolution: str,
+    export_quality: str,
+    aspect_ratio: str,
+    framing_mode: str,
+    t_sec: float = 0.0,
+) -> Optional[bytes]:
+    """
+    Primeiro frame (ou instante ``t_sec``) já com o mesmo enquadramento da exportação.
+    Usado na pré-visualização da capa e das legendas na UI.
+    """
+    target_w, target_h = get_export_dimensions(resolution, export_quality, aspect_ratio)
+    vf = build_framing_vf(
+        target_w,
+        target_h,
+        framing_mode,
+        video_path,
+        clip=None,
+        focus_time_abs=float(t_sec),
+    )
+    full_vf = f"setpts=PTS-STARTPTS,{vf}"
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{max(0.0, t_sec):.3f}",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-vf",
+        full_vf,
+        "-f",
+        "image2pipe",
+        "-c:v",
+        "png",
+        "pipe:1",
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0 or not proc.stdout:
+        err = (proc.stderr or b"").decode(errors="replace")[:500]
+        logger.debug("export_preview_frame_png_bytes falhou: %s", err)
+        return None
+    return proc.stdout
+
+
 def _path_for_ffmpeg_filter(path: Path) -> str:
     s = path.resolve().as_posix()
     if len(s) >= 2 and s[1] == ":":
@@ -490,6 +576,7 @@ def create_social_cover(
     aspect_ratio: str = "Vertical (9:16) - Redes sociais",
     framing_mode: str = "Manter conteúdo (com bordas)",
     clip: Optional[Clip] = None,
+    cover_style: Optional[SocialCoverStyle] = None,
 ) -> Path:
     """
     Cria capa JPG alinhada à resolução/formato da exportação e ao modo de enquadramento.
@@ -513,7 +600,11 @@ def create_social_cover(
     )
 
     # Mesmo motor visual das legendas TikTok (ASS / libass), com quebra de linha segura.
-    fs, _mv = tiktok_subtitle_style_sizes(target_w, target_h)
+    fs_base, _mv0 = tiktok_subtitle_style_sizes(target_w, target_h)
+    if cover_style is not None and cover_style.font_size and cover_style.font_size > 0:
+        fs = cover_style.font_size
+    else:
+        fs = fs_base
     max_chars = max(16, int(target_w / max(fs * 0.45, 1.0)))
     wrapped = textwrap.wrap(
         hook_line,
@@ -535,7 +626,7 @@ def create_social_cover(
                 f"PlayResY: {target_h}",
                 "",
                 "[V4+ Styles]",
-                tiktok_cover_ass_v4_style_block(target_w, target_h),
+                tiktok_cover_ass_v4_style_block(target_w, target_h, cover_style),
                 "",
                 "[Events]",
                 "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -672,6 +763,7 @@ def render_clips(
     framing_mode: str = "Manter conteúdo (com bordas)",
     enable_tiktok_captions: bool = False,
     bitrate: str | None = None,
+    tiktok_caption_style: Optional[TiktokCaptionStyle] = None,
 ) -> None:
     """
     Renderiza uma lista de clipes para MP4 H.264, mantendo a mesma lógica do código original.
@@ -771,7 +863,7 @@ def render_clips(
                 f"PlayResY: {target_h}",
                 "",
                 "[V4+ Styles]",
-                tiktok_ass_v4_style_block(target_w, target_h),
+                tiktok_ass_v4_style_block(target_w, target_h, tiktok_caption_style),
                 "",
                 "[Events]",
                 "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

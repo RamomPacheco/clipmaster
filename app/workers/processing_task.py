@@ -6,7 +6,13 @@ from typing import List, Optional
 from PySide6.QtCore import QThread, Signal
 from app.core import config
 from app.core.logger import logger
-from app.models.schemas import Clip, ClipList, ProcessingMetrics
+from app.models.schemas import (
+    Clip,
+    ClipList,
+    ProcessingMetrics,
+    SocialCoverStyle,
+    TiktokCaptionStyle,
+)
 from app.services.clip_manager import (
     append_history_entry,
     build_overlapping_chapters,
@@ -53,6 +59,8 @@ class VideoProcessorThread(QThread):
         social_model_name: Optional[str] = None,
         generate_social_cover: bool = True,
         enable_social_package: bool = True,
+        social_cover_style: Optional[SocialCoverStyle] = None,
+        tiktok_caption_style: Optional[TiktokCaptionStyle] = None,
     ) -> None:
         super().__init__()
         self.video_path = Path(video_path)
@@ -80,6 +88,8 @@ class VideoProcessorThread(QThread):
         self.social_model_name = (social_model_name or "").strip() or None
         self.generate_social_cover = generate_social_cover
         self.enable_social_package = enable_social_package
+        self.social_cover_style = social_cover_style
+        self.tiktok_caption_style = tiktok_caption_style
 
         self.metrics = ProcessingMetrics(
             model_used=model_name,
@@ -312,6 +322,7 @@ class VideoProcessorThread(QThread):
                 framing_mode=self.framing_mode,
                 enable_tiktok_captions=self.enable_tiktok_captions,
                 bitrate=self.bitrate or None,
+                tiktok_caption_style=self.tiktok_caption_style,
             )
 
             self.metrics.rendering_time = time.time() - rendering_start
@@ -368,6 +379,7 @@ class VideoProcessorThread(QThread):
                             aspect_ratio=self.aspect_ratio,
                             framing_mode=self.framing_mode,
                             clip=clip,
+                            cover_style=self.social_cover_style,
                         )
                         cover_line = cover_path.name
                         cover_log = cover_path.name
