@@ -168,24 +168,54 @@ class VideoProcessorThread(QThread):
             if "cpu" in device_mode:
                 whisper_device = "cpu"
                 whisper_compute = "int8"
+                self.progress_signal.emit(
+                    f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
+                )
+                segments, max_video_duration = transcribe_audio(
+                    temp_audio_path,
+                    model_name=self.whisper_model,
+                    device_override=whisper_device,
+                    compute_override=whisper_compute,
+                )
             elif "gpu" in device_mode or "cuda" in device_mode:
                 whisper_device = "cuda"
                 # Mais estável que float16 puro em muitas máquinas Windows/CUDA
                 whisper_compute = "int8_float16"
+                self.progress_signal.emit(
+                    f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
+                )
+                segments, max_video_duration = transcribe_audio(
+                    temp_audio_path,
+                    model_name=self.whisper_model,
+                    device_override=whisper_device,
+                    compute_override=whisper_compute,
+                )
             else:
-                # Auto: prioriza estabilidade (CPU) quando possível.
-                # Se quiser forçar GPU, use a opção explícita "GPU CUDA".
-                whisper_device = "cpu"
-                whisper_compute = "int8"
-            self.progress_signal.emit(
-                f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
-            )
-            segments, max_video_duration = transcribe_audio(
-                temp_audio_path,
-                model_name=self.whisper_model,
-                device_override=whisper_device,
-                compute_override=whisper_compute,
-            )
+                # Auto: tenta GPU primeiro e, se houver qualquer falha, cai para CPU.
+                self.progress_signal.emit(
+                    "Transcrição com Whisper em AUTO: a tentar GPU CUDA (int8_float16)..."
+                )
+                try:
+                    segments, max_video_duration = transcribe_audio(
+                        temp_audio_path,
+                        model_name=self.whisper_model,
+                        device_override="cuda",
+                        compute_override="int8_float16",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "Whisper AUTO: falha na GPU (%s). A repetir em CPU (int8).",
+                        e,
+                    )
+                    self.progress_signal.emit(
+                        "Whisper AUTO: GPU falhou, a repetir em CPU (int8)..."
+                    )
+                    segments, max_video_duration = transcribe_audio(
+                        temp_audio_path,
+                        model_name=self.whisper_model,
+                        device_override="cpu",
+                        compute_override="int8",
+                    )
             self.metrics.transcription_time = time.time() - self.metrics.start_time
 
             # Remove áudio temporário

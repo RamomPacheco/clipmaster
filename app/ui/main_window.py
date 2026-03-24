@@ -989,19 +989,66 @@ class ViralApp(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(16)
-        main_layout.setContentsMargins(24, 20, 24, 16)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
+        header = QFrame()
+        header.setObjectName("appHeader")
+        header.setFixedHeight(60)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 0, 20, 0)
+        header_layout.setSpacing(0)
         lbl_title = QLabel("AI Viral Clipper Pro")
-        lbl_title.setStyleSheet("font-size: 22px; font-weight: bold; color: #ffffff;")
-        lbl_tagline = QLabel("Corte viral em poucos cliques — ajustes técnicos na aba Avançado.")
-        lbl_tagline.setStyleSheet("font-size: 12px; color: #888888; margin-bottom: 4px;")
-        main_layout.addWidget(lbl_title)
-        main_layout.addWidget(lbl_tagline)
+        lbl_title.setObjectName("appHeaderTitle")
+        header_layout.addWidget(lbl_title, alignment=Qt.AlignVCenter | Qt.AlignLeft)
+        header_layout.addStretch()
+        main_layout.addWidget(header)
+
+        dashboard = QWidget()
+        dashboard_layout = QGridLayout(dashboard)
+        dashboard_layout.setContentsMargins(0, 0, 0, 0)
+        dashboard_layout.setHorizontalSpacing(0)
+        dashboard_layout.setVerticalSpacing(0)
+        dashboard_layout.setColumnStretch(0, 2)  # ~40%
+        dashboard_layout.setColumnStretch(1, 3)  # ~60%
+        main_layout.addWidget(dashboard, stretch=1)
+
+        left_sidebar = QFrame()
+        left_sidebar.setObjectName("leftSidebar")
+        left_sidebar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        left_layout = QVBoxLayout(left_sidebar)
+        left_layout.setContentsMargins(16, 14, 16, 14)
+        left_layout.setSpacing(12)
+
+        lbl_nav = QLabel("Navegação")
+        lbl_nav.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        left_layout.addWidget(lbl_nav)
+
+        self.btn_tab_basic = QPushButton("Essencial")
+        self.btn_tab_basic.setObjectName("navTabButton")
+        self.btn_tab_basic.setCheckable(True)
+        self.btn_tab_basic.clicked.connect(lambda: self.tabs.setCurrentIndex(0))
+        left_layout.addWidget(self.btn_tab_basic)
+
+        self.btn_tab_adv = QPushButton("Avançado / Ajustes finos")
+        self.btn_tab_adv.setObjectName("navTabButton")
+        self.btn_tab_adv.setCheckable(True)
+        self.btn_tab_adv.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        left_layout.addWidget(self.btn_tab_adv)
+
+        self.btn_tab_social = QPushButton("Pacote Social")
+        self.btn_tab_social.setObjectName("navTabButton")
+        self.btn_tab_social.setCheckable(True)
+        self.btn_tab_social.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
+        left_layout.addWidget(self.btn_tab_social)
+
+        left_layout.addStretch()
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
         self.tabs.setMinimumHeight(320)
+        self.tabs.tabBar().hide()
+        self.tabs.setStyleSheet("QTabWidget::pane { border: 0; margin: 0; padding: 0; }")
 
         # ---------- Aba Essencial ----------
         tab_basic = QWidget()
@@ -1232,14 +1279,8 @@ class ViralApp(QMainWindow):
         # ---------- Aba Pacote Social (sub-abas) ----------
         tab_social = QWidget()
         social_layout = QVBoxLayout(tab_social)
-        social_layout.setSpacing(10)
-        social_layout.setContentsMargins(8, 8, 8, 8)
-
-        lbl_social_main_title = QLabel("Pacote social")
-        lbl_social_main_title.setStyleSheet(
-            "font-size: 15px; font-weight: bold; color: #e8e8e8; padding-bottom: 2px;"
-        )
-        social_layout.addWidget(lbl_social_main_title)
+        social_layout.setSpacing(6)
+        social_layout.setContentsMargins(0, 0, 0, 0)
 
         self.chk_enable_social_package = QCheckBox(
             "Gerar pacote social após renderizar os clipes (texto + capa por clipe)"
@@ -1251,15 +1292,13 @@ class ViralApp(QMainWindow):
         )
         self.chk_enable_social_package.toggled.connect(self._apply_social_package_controls_state)
         self.chk_enable_social_package.toggled.connect(self._update_social_cover_preview)
-        social_layout.addWidget(self.chk_enable_social_package)
 
         lbl_social_nav_hint = QLabel(
             "Use as sub-abas: IA gera título e descrição; Capa ajusta a imagem JPG; "
             "Legendas controla o texto nos vídeos exportados (independente do pacote)."
         )
         lbl_social_nav_hint.setWordWrap(True)
-        lbl_social_nav_hint.setStyleSheet("color: #9a9a9a; font-size: 11px; margin-bottom: 4px;")
-        social_layout.addWidget(lbl_social_nav_hint)
+        lbl_social_nav_hint.setStyleSheet("color: #9a9a9a; font-size: 11px;")
 
         self.tabs_social_inner = QTabWidget()
         self.tabs_social_inner.setMinimumHeight(440)
@@ -1389,7 +1428,7 @@ class ViralApp(QMainWindow):
 
         style_grid.addWidget(QLabel("Tamanho"), 1, 0)
         self.spin_social_font_size = QSpinBox()
-        self.spin_social_font_size.setRange(0, 200)
+        self.spin_social_font_size.setRange(0, 999)
         self.spin_social_font_size.setSpecialValueText("Automático")
         self.spin_social_font_size.setValue(0)
         self.spin_social_font_size.setToolTip(
@@ -1402,7 +1441,7 @@ class ViralApp(QMainWindow):
 
         style_grid.addWidget(QLabel("Margem inferior"), 1, 2)
         self.spin_social_margin_v = QSpinBox()
-        self.spin_social_margin_v.setRange(0, 400)
+        self.spin_social_margin_v.setRange(0, 999)
         self.spin_social_margin_v.setSpecialValueText("Automático")
         self.spin_social_margin_v.setValue(0)
         self.spin_social_margin_v.setToolTip(
@@ -1544,7 +1583,7 @@ class ViralApp(QMainWindow):
 
         cap_grid.addWidget(QLabel("Tamanho"), 1, 0)
         self.spin_caption_font_size = QSpinBox()
-        self.spin_caption_font_size.setRange(0, 200)
+        self.spin_caption_font_size.setRange(0, 999)
         self.spin_caption_font_size.setSpecialValueText("Automático")
         self.spin_caption_font_size.setValue(0)
         self.spin_caption_font_size.valueChanged.connect(
@@ -1554,7 +1593,7 @@ class ViralApp(QMainWindow):
 
         cap_grid.addWidget(QLabel("Margem inferior"), 1, 2)
         self.spin_caption_margin_v = QSpinBox()
-        self.spin_caption_margin_v.setRange(0, 400)
+        self.spin_caption_margin_v.setRange(0, 999)
         self.spin_caption_margin_v.setSpecialValueText("Automático")
         self.spin_caption_margin_v.setValue(0)
         self.spin_caption_margin_v.valueChanged.connect(
@@ -1637,6 +1676,8 @@ class ViralApp(QMainWindow):
         self.tabs_social_inner.addTab(tab_social_captions, "Legendas TikTok")
 
         social_layout.addWidget(self.tabs_social_inner, stretch=1)
+        social_layout.addWidget(self.chk_enable_social_package)
+        social_layout.addWidget(lbl_social_nav_hint)
 
         scroll.setWidget(scroll_content)
         adv_outer.addWidget(scroll)
@@ -1644,7 +1685,17 @@ class ViralApp(QMainWindow):
         self.tabs.addTab(tab_basic, "Essencial")
         self.tabs.addTab(tab_adv, "Avançado / Ajustes finos")
         self.tabs.addTab(tab_social, "Pacote Social")
-        main_layout.addWidget(self.tabs)
+
+        right_content = QFrame()
+        right_content.setObjectName("rightContent")
+        right_content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_layout = QVBoxLayout(right_content)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        right_layout.addWidget(self.tabs, stretch=1)
+
+        dashboard_layout.addWidget(left_sidebar, 0, 0)
+        dashboard_layout.addWidget(right_content, 0, 1)
 
         self._apply_social_package_controls_state()
         self._apply_caption_look_state()
@@ -1660,6 +1711,7 @@ class ViralApp(QMainWindow):
         self.combo_framing_mode.currentTextChanged.connect(
             lambda _t: self._schedule_export_preview_refresh()
         )
+        self.tabs.currentChanged.connect(lambda i: self._sync_main_nav_buttons(i))
         self.tabs.currentChanged.connect(lambda _i: self._refresh_export_style_previews())
 
         self.progress_bar = QProgressBar()
@@ -1699,12 +1751,16 @@ class ViralApp(QMainWindow):
         self.log_output.setVisible(False)
         self.log_output.setMaximumHeight(220)
 
-        main_layout.addWidget(self.progress_bar)
-        main_layout.addWidget(self.btn_action)
-        main_layout.addLayout(actions_row)
-        main_layout.addWidget(self.chk_show_logs)
-        main_layout.addWidget(self.lbl_log)
-        main_layout.addWidget(self.log_output)
+        action_panel = QVBoxLayout()
+        action_panel.setSpacing(8)
+        action_panel.addWidget(self.progress_bar)
+        action_panel.addWidget(self.btn_action)
+        action_panel.addLayout(actions_row)
+        action_panel.addWidget(self.chk_show_logs)
+        action_panel.addWidget(self.lbl_log)
+        action_panel.addWidget(self.log_output)
+        left_layout.addLayout(action_panel)
+        self._sync_main_nav_buttons(0)
 
         status = self.statusBar()
         status.setStyleSheet(
@@ -1712,12 +1768,23 @@ class ViralApp(QMainWindow):
             "border-top: 1px solid #333333; }"
         )
 
+    def _sync_main_nav_buttons(self, index: int) -> None:
+        if not hasattr(self, "btn_tab_basic"):
+            return
+        self.btn_tab_basic.setChecked(index == 0)
+        self.btn_tab_adv.setChecked(index == 1)
+        self.btn_tab_social.setChecked(index == 2)
+
     # ---------------- Tema ----------------
     def _apply_dark_theme(self) -> None:
         self.setStyleSheet(
             """
             QMainWindow { background-color: #121212; }
             QWidget { color: #ffffff; font-family: 'Segoe UI', Arial, sans-serif; }
+            #appHeader { background-color: #17171a; border-bottom: 1px solid #303035; }
+            #appHeaderTitle { font-size: 18px; font-weight: 700; color: #f2f2f2; }
+            #leftSidebar { background-color: #141417; border-right: 1px solid #2e2e33; }
+            #rightContent { background-color: #1e1e1e; }
 
             QTabWidget::pane { border: 1px solid #3e3e42; border-radius: 6px; top: -1px; }
             QTabBar::tab {
@@ -1767,6 +1834,14 @@ class ViralApp(QMainWindow):
             QPushButton#secondaryButton:hover {
                 background-color: #2d2d30; border-color: #0078D7; color: #ffffff;
             }
+            QPushButton#navTabButton {
+                background-color: #232328; color: #d2d2d2; font-size: 13px; font-weight: 600;
+                border: 1px solid #3a3a41; border-radius: 8px; padding: 10px 12px; text-align: left;
+            }
+            QPushButton#navTabButton:hover { background-color: #2b2b31; border-color: #4a4a52; }
+            QPushButton#navTabButton:checked {
+                background-color: #0078D7; color: #ffffff; border: 1px solid #0078D7;
+            }
 
             QTextEdit {
                 background-color: #0c0c0c; color: #00ff00;
@@ -1780,6 +1855,10 @@ class ViralApp(QMainWindow):
             """
             QMainWindow { background-color: #f0f0f0; }
             QWidget { color: #000000; font-family: 'Segoe UI', Arial, sans-serif; }
+            #appHeader { background-color: #ffffff; border-bottom: 1px solid #d3d3d3; }
+            #appHeaderTitle { font-size: 18px; font-weight: 700; color: #121212; }
+            #leftSidebar { background-color: #f7f7f7; border-right: 1px solid #d5d5d5; }
+            #rightContent { background-color: #ffffff; }
             QTabWidget::pane { border: 1px solid #cccccc; border-radius: 6px; }
             QTabBar::tab {
                 background: #e8e8e8; padding: 10px 20px;
@@ -1816,6 +1895,14 @@ class ViralApp(QMainWindow):
             }
             QPushButton#secondaryButton:hover {
                 background-color: #e8e8e8; border-color: #0078D7;
+            }
+            QPushButton#navTabButton {
+                background-color: #efefef; color: #222222; font-size: 13px; font-weight: 600;
+                border: 1px solid #d0d0d0; border-radius: 8px; padding: 10px 12px; text-align: left;
+            }
+            QPushButton#navTabButton:hover { background-color: #e7e7e7; border-color: #bdbdbd; }
+            QPushButton#navTabButton:checked {
+                background-color: #0078D7; color: #ffffff; border: 1px solid #0078D7;
             }
             QProgressBar {
                 background-color: #cccccc; border-radius: 4px; border: none;
