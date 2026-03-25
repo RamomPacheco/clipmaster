@@ -1,13 +1,11 @@
 from __future__ import annotations
-
 import json
 import os
 import re
 from typing import Any, Dict, List, Tuple
 
 import ollama
-
-from app.core.config import DEFAULT_LLM_MODEL
+from app.core.config import DEFAULT_LLM_MODEL, LLMParams
 from app.core.logger import logger
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -278,9 +276,11 @@ def _analyze_with_ollama(
         ],
         format="json",
         options={
-            "num_ctx": 4096,
-            "temperature": 0.1,
-            "top_p": 0.9,
+            # TODO: Verificar se o num_ctx é necessário
+            "num_ctx": LLMParams.NUM_CTX,
+            "num_predict": LLMParams.NUM_PREDICT,
+            "temperature": LLMParams.TEMPERATURE,
+            "top_p": LLMParams.TOP_P,
         },
     )
     raw_content = response["message"]["content"]
@@ -547,9 +547,10 @@ def generate_social_package(
                 ],
                 format="json",
                 options={
-                    "num_ctx": 8192,
-                    "temperature": 0.2,
-                    "top_p": 0.9,
+                    # TODO: Parametro de contexto do modelo
+                    "num_ctx": LLMParams.NUM_CTX,
+                    "temperature": LLMParams.TEMPERATURE,
+                    "top_p": LLMParams.TOP_P,
                 },
             )
             raw_content = response["message"]["content"]

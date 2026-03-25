@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import shutil
 import textwrap
 from pathlib import Path
 from collections import defaultdict
@@ -16,6 +17,27 @@ PROFILE_MAP = {
     "4K (2160p)": {"preset": "slow", "crf": "18", "height": 2160},
 }
 FALLBACK_PROFILE = {"preset": "medium", "crf": "21", "height": 1080}
+
+
+def _ffmpeg_has_encoder(encoder: str) -> bool:
+    """
+    Detecta se o FFmpeg tem um encoder disponível (ex.: h264_nvenc).
+    Mantém fallback seguro para libx264 se não houver.
+    """
+    if not shutil.which("ffmpeg"):
+        return False
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return False
+    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    return encoder in out
 
 
 def get_export_dimensions(
@@ -773,6 +795,12 @@ def render_clips(
     profile = PROFILE_MAP.get(export_quality) or PROFILE_MAP.get(resolution) or FALLBACK_PROFILE
     target_w, target_h = get_export_dimensions(resolution, export_quality, aspect_ratio)
 
+    # Usa GPU (NVENC) se disponível; caso contrário mantém libx264.
+    use_nvenc = _ffmpeg_has_encoder("h264_nvenc")
+    v_encoder = "h264_nvenc" if use_nvenc else "libx264"
+    if use_nvenc:
+        logger.info("FFmpeg: encoder GPU detectado (h264_nvenc). Renderização acelerada ativada.")
+
     def sec_to_ass(ts: float) -> str:
         ts = max(0.0, ts)
         total_cs = int(round(ts * 100))
@@ -902,11 +930,9 @@ def render_clips(
             "-to",
             str(clip.end),
             "-c:v",
-            "libx264",
+            v_encoder,
             "-preset",
             profile["preset"],
-            "-crf",
-            profile["crf"],
             "-pix_fmt",
             "yuv420p",
             "-r",
@@ -920,6 +946,12 @@ def render_clips(
             "-af",
             "aresample=async=1",
         ]
+        # libx264 usa CRF; NVENC usa CQ/RC (mantemos default simples e só removemos CRF).
+        if v_encoder == "libx264":
+            cmd.extend(["-crf", profile["crf"]])
+        else:
+            # Qualidade visual aproximada ao CRF: usa CQ. (Valor moderado; mantém velocidade.)
+            cmd.extend(["-cq", str(int(profile["crf"]))])
 
         framing_vf = build_framing_vf(
             target_w,
@@ -966,17 +998,19 @@ def render_clips(
                 "-vf",
                 f"subtitles=filename='{ass_for_ffmpeg}'",
                 "-c:v",
-                "libx264",
+                v_encoder,
                 "-preset",
                 profile["preset"],
-                "-crf",
-                profile["crf"],
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
                 "copy",
                 str(output_file),
             ]
+            if v_encoder == "libx264":
+                subtitle_cmd.extend(["-crf", profile["crf"]])
+            else:
+                subtitle_cmd.extend(["-cq", str(int(profile["crf"]))])
             try:
                 proc = subprocess.run(
                     subtitle_cmd,

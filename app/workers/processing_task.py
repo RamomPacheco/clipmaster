@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List, Optional
 from PySide6.QtCore import QThread, Signal
 from app.core import config
+from app.core.config import LLMParams
 from app.core.logger import logger
 from app.models.schemas import (
     Clip,
@@ -24,7 +25,6 @@ from app.services.clip_manager import (
 from app.services.llm_analyzer import analyze_viral_potential, generate_social_package
 from app.services.transcription import transcribe_audio
 from app.services.video_engine import create_social_cover, extract_safe_audio, render_clips
-
 
 class VideoProcessorThread(QThread):
     """
@@ -191,31 +191,31 @@ class VideoProcessorThread(QThread):
                     compute_override=whisper_compute,
                 )
             else:
-                # Auto: tenta GPU primeiro e, se houver qualquer falha, cai para CPU.
-                self.progress_signal.emit(
-                    "Transcrição com Whisper em AUTO: a tentar GPU CUDA (int8_float16)..."
-                )
+                # Auto: escolhe CUDA se houver GPU disponível via ctranslate2; caso contrário CPU.
+                use_cuda = False
                 try:
-                    segments, max_video_duration = transcribe_audio(
-                        temp_audio_path,
-                        model_name=self.whisper_model,
-                        device_override="cuda",
-                        compute_override="int8_float16",
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        "Whisper AUTO: falha na GPU (%s). A repetir em CPU (int8).",
-                        e,
-                    )
-                    self.progress_signal.emit(
-                        "Whisper AUTO: GPU falhou, a repetir em CPU (int8)..."
-                    )
-                    segments, max_video_duration = transcribe_audio(
-                        temp_audio_path,
-                        model_name=self.whisper_model,
-                        device_override="cpu",
-                        compute_override="int8",
-                    )
+                    import ctranslate2  # type: ignore[import-not-found]
+
+                    use_cuda = ctranslate2.get_cuda_device_count() > 0
+                except Exception:  # noqa: BLE001
+                    use_cuda = False
+
+                if use_cuda:
+                    whisper_device = "cuda"
+                    whisper_compute = "int8_float16"
+                else:
+                    whisper_device = "cpu"
+                    whisper_compute = "int8"
+
+                self.progress_signal.emit(
+                    f"Transcrição com Whisper em AUTO: {whisper_device.upper()} ({whisper_compute})."
+                )
+                segments, max_video_duration = transcribe_audio(
+                    temp_audio_path,
+                    model_name=self.whisper_model,
+                    device_override=whisper_device,
+                    compute_override=whisper_compute,
+                )
             self.metrics.transcription_time = time.time() - self.metrics.start_time
 
             # Remove áudio temporário
@@ -246,7 +246,7 @@ class VideoProcessorThread(QThread):
 
             for i, chunk in enumerate(chapters, start=1):
                 self.progress_signal.emit(
-                    f"IA analisando Parte {i} de {total_chapters} (Contexto de 10 min)..."
+                    f"IA analisando Parte {i} de {total_chapters} (Contexto de 5 min)..."
                 )
                 chunk_text = "\n".join(
                     [
@@ -315,6 +315,13 @@ class VideoProcessorThread(QThread):
             if not all_clips:
                 self.progress_signal.emit(
                     "Aviso: A IA não encontrou nenhum clipe viral forte o suficiente."
+                )
+                logger.warning(
+                    # TODO: Alerta de erro do num_ctx é necessário ser melhorado
+                    "Nenhum clipe encontrado. Verifique se o Ollama está rodando (`ollama serve`) e se o modelo '%s' "
+                    f"está instalado (`ollama pull {self.model_name}`). num_ctx atual: {LLMParams.NUM_CTX}.",
+                    self.model_name,
+                    self.model_name,
                 )
                 self.finished_signal.emit(
                     "Processamento concluído sem clipes extraídos."

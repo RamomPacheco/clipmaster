@@ -47,7 +47,7 @@ def whisper_device_effective() -> str:
     # Para usar GPU, defina explicitamente `WHISPER_DEVICE=cuda`.
     if _env_bool("WHISPER_SHARED_GPU_SAFE") or _env_bool("WHISPER_PREFER_CPU"):
         return "cpu"
-    return "cpu"
+    return _default_whisper_device()
 
 # Pasta padrão de exports (relativa à raiz do projeto antigo)
 EXPORTS_ROOT = PROJECT_ROOT / "exports"
@@ -67,13 +67,19 @@ def api_keys_storage_path() -> Path:
     return d / "api_keys.json"
 
 # Parâmetros de clipes
+class LLMParams:
+    NUM_CTX = 4096
+    NUM_PREDICT = 1024
+    TEMPERATURE = 0.2
+    TOP_P = 0.9
+
 MIN_CLIP_SECONDS = 30.0
 MAX_CLIP_SECONDS = 60.0
 
-# Chunking da transcrição (10 minutos)
+# Chunking da transcrição (5 minutos)
 CHUNK_SECONDS = 600.0
 # Sobreposição entre chunks (reduz cortes de ideia no meio entre blocos)
-CHUNK_OVERLAP_SECONDS = 45.0
+CHUNK_OVERLAP_SECONDS = 30.0
 
 # Faster-Whisper — qualidade de timestamp e texto
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")

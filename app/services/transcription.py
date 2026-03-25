@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import multiprocessing
 from multiprocessing.context import BaseContext
+import json
+import os
 from pathlib import Path
 from queue import Empty
+import tempfile
+import time
 from typing import Any, Dict, List, Tuple
 
 from app.core import config
@@ -42,26 +46,42 @@ def worker_transcricao(payload: Dict[str, Any], result_queue: multiprocessing.Qu
     compute = str(payload["compute"]).lower()
     beam_size = int(payload["beam_size"])
     language = payload.get("language")
+    out_jsonl_path = PathLocal(payload["out_jsonl_path"])
 
-    def run_pass(dev: str, ctype: str) -> Tuple[List[Dict[str, Any]], float]:
-        model = WhisperModel(
-            model_size,
-            device=dev,
-            compute_type=ctype,
-        )
+    def _send_progress(msg: str) -> None:
+        """
+        Logs no processo filho nem sempre aparecem na UI. Enviamos via Queue para o pai.
+        """
         try:
-            segments_generator, info = model.transcribe(
-                str(audio_path),
-                beam_size=beam_size,
-                vad_filter=True,
-                word_timestamps=True,
-                language=language,
-            )
+            result_queue.put({"type": "progress", "message": str(msg)})
+        except Exception:  # noqa: BLE001
+            pass
 
-            segments: List[Dict[str, Any]] = []
-            max_duration = float(info.duration)
+    def run_pass_and_write_jsonl_and_exit(dev: str, ctype: str) -> None:
+        """
+        Transcreve e grava a saída em JSONL.
+        Importante: em CUDA/Windows, o teardown (del/GC) pode travar; por isso devolvemos
+        o resultado ao pai antes de qualquer cleanup pesado e encerramos o processo.
+        """
+        _send_progress(f"Whisper worker iniciado ({dev}/{ctype}).")
+        model = WhisperModel(model_size, device=dev, compute_type=ctype)
+        segments_generator, info = model.transcribe(
+            str(audio_path),
+            beam_size=beam_size,
+            vad_filter=True,
+            word_timestamps=True,
+            language=language,
+        )
 
-            for s in segments_generator:
+        max_duration = float(info.duration)
+        t0 = time.time()
+        seg_count = 0
+        word_count = 0
+        last_end = 0.0
+
+        out_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_jsonl_path.open("w", encoding="utf-8") as f:
+            for idx, s in enumerate(segments_generator, start=1):
                 words: List[Dict[str, Any]] = []
                 if word_list := getattr(s, "words", None):
                     for w in word_list:
@@ -72,42 +92,56 @@ def worker_transcricao(payload: Dict[str, Any], result_queue: multiprocessing.Qu
                                 "word": str(w.word),
                             }
                         )
-                segments.append(
-                    {
-                        "start": float(s.start),
-                        "end": float(s.end),
-                        "text": str(s.text),
-                        "words": words,
-                    }
-                )
-                if len(segments) % 15 == 0:
-                    logger.info(
-                        "Transcrevendo... %.2fs processados de %.2fs", s.end, max_duration
-                    )
+                word_count += len(words)
+                seg = {
+                    "start": float(s.start),
+                    "end": float(s.end),
+                    "text": str(s.text),
+                    "words": words,
+                }
+                f.write(json.dumps(seg, ensure_ascii=False))
+                f.write("\n")
+                seg_count = idx
+                last_end = float(getattr(s, "end", 0.0) or 0.0)
+                if idx % 15 == 0:
+                    msg = f"Transcrevendo... {float(s.end):.2f}s processados de {max_duration:.2f}s"
+                    logger.info("%s", msg)
+                    _send_progress(msg)
 
-            return segments, max_duration
-        finally:
-            del model
-            gc_local.collect()
+        final_msg = (
+            "Transcrição terminou "
+            f"(último={last_end:.2f}s / total={max_duration:.2f}s). "
+            f"Ficheiro pronto ({out_jsonl_path.name}) com {seg_count} segmento(s) "
+            f"e ~{word_count} palavra(s) em {time.time() - t0:.2f}s."
+        )
+        logger.info("%s", final_msg)
+        _send_progress(final_msg)
+
+        # CRÍTICO (Windows/CUDA): não depender de IPC para “ok”.
+        # O processo pai já conhece o caminho do JSONL (payload["out_jsonl_path"]).
+        # Se o teardown do CUDA travar, o pai ainda pode matar o worker e carregar o ficheiro.
+        os._exit(0)  # noqa: SCS108
 
     try:
         try:
-            segments, max_duration = run_pass(device, compute)
+            run_pass_and_write_jsonl_and_exit(device, compute)
         except Exception as e:  # noqa: BLE001
             if device == "cuda" and _looks_like_gpu_share_failure(e):
                 logger.warning(
                     "Transcrição na GPU falhou no worker (%s). Repetindo em CPU (int8).",
                     e,
                 )
-                segments, max_duration = run_pass("cpu", "int8")
+                run_pass_and_write_jsonl_and_exit("cpu", "int8")
             else:
                 raise
-        result_queue.put(
-            {"ok": True, "segments": segments, "duration": max_duration},
-        )
+        # Se chegou aqui, algo impediu o exit — encerra por segurança.
+        os._exit(0)  # noqa: SCS108
     except Exception as e:  # noqa: BLE001
         logger.exception("Falha na transcrição (processo filho Whisper).")
-        result_queue.put({"ok": False, "error": repr(e)})
+        try:
+            result_queue.put({"ok": False, "error": repr(e)})
+        finally:
+            os._exit(1)  # noqa: SCS108
 
 
 # Timeout generoso: vídeos longos em CPU podem demorar horas
@@ -131,6 +165,16 @@ def transcribe_audio(
     compute = (compute_override or config.WHISPER_COMPUTE_TYPE).strip().lower()
     model_size = model_name or config.WHISPER_MODEL
 
+    # Evita congelar por pickle/cópia de um objeto gigante via Queue (Windows).
+    fd, out_path = tempfile.mkstemp(
+        prefix="whisper_segments_",
+        suffix=".jsonl",
+        dir=str(Path(audio_path).resolve().parent),
+        text=True,
+    )
+    os.close(fd)
+    out_jsonl_path = str(Path(out_path).resolve())
+
     payload: Dict[str, Any] = {
         "audio_path": str(Path(audio_path).resolve()),
         "model_size": model_size,
@@ -138,6 +182,7 @@ def transcribe_audio(
         "compute": compute,
         "beam_size": config.WHISPER_BEAM_SIZE,
         "language": config.WHISPER_LANGUAGE,
+        "out_jsonl_path": out_jsonl_path,
     }
 
     ctx: BaseContext = multiprocessing.get_context("spawn")
@@ -151,7 +196,31 @@ def transcribe_audio(
     result: Dict[str, Any] | None = None
     try:
         try:
-            result = result_queue.get(timeout=_TRANSCRIBE_QUEUE_TIMEOUT_SEC)
+            # Consome progresso do worker (se houver), mas não depende de "ok" via Queue.
+            # A finalização bem-sucedida é detectada pelo término do processo + presença do JSONL.
+            t_deadline = time.time() + float(_TRANSCRIBE_QUEUE_TIMEOUT_SEC)
+            while proc.is_alive() and time.time() < t_deadline:
+                try:
+                    msg = result_queue.get(timeout=1.0)
+                except Empty:
+                    continue
+                if isinstance(msg, dict) and msg.get("type") == "progress":
+                    m = msg.get("message")
+                    if isinstance(m, str) and m.strip():
+                        logger.info("%s", m.strip())
+                    continue
+                # Mensagens de erro (opcional)
+                result = msg if isinstance(msg, dict) else None
+                if isinstance(result, dict) and result.get("ok") is False:
+                    break
+
+            # Se ainda estiver vivo após o deadline, força término (teardown CUDA pode travar).
+            if proc.is_alive():
+                logger.warning(
+                    "Worker Whisper ainda ativo após timeout de transcrição. A forçar término para prosseguir."
+                )
+                proc.kill()
+            proc.join(timeout=_JOIN_GRACE_SEC)
         except Empty:
             logger.error("Timeout à espera da transcrição Whisper (fila vazia).")
             proc.terminate()
@@ -165,19 +234,35 @@ def transcribe_audio(
             proc.kill()
             proc.join(timeout=30)
 
-    if not isinstance(result, dict):
-        raise RuntimeError("Resposta inválida do worker de transcrição.")
-    if not result.get("ok"):
+    segments: List[Dict[str, Any]] = []
+    # Se o worker mandou erro explícito, respeita.
+    if isinstance(result, dict) and result.get("ok") is False:
         err = result.get("error", "erro desconhecido")
         raise RuntimeError(f"Transcrição falhou no processo isolado: {err}")
 
-    segments = result.get("segments")
-    duration = result.get("duration")
-    if not isinstance(segments, list):
-        raise RuntimeError("Worker devolveu segmentos inválidos.")
+    p = Path(out_jsonl_path)
+    if not p.exists():
+        raise RuntimeError("Ficheiro de transcrição não encontrado (jsonl).")
+    logger.info("A carregar transcrição do disco (%s)...", p.name)
     try:
-        max_duration = float(duration)
-    except (TypeError, ValueError) as e:
-        raise RuntimeError("Duração inválida devolvida pelo worker.") from e
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                segments.append(json.loads(raw))
+    finally:
+        try:
+            p.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Duração: usa o fim do último segmento (robusto mesmo sem mensagem "duration").
+    max_duration = 0.0
+    if segments:
+        try:
+            max_duration = float(segments[-1].get("end", 0.0))
+        except Exception:  # noqa: BLE001
+            max_duration = 0.0
 
     return segments, max_duration
