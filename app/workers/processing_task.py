@@ -1,12 +1,16 @@
 from __future__ import annotations
+import json
+import logging
+import re
 import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import List, Optional
 from PySide6.QtCore import QThread, Signal
 from app.core import config
 from app.core.config import LLMParams
-from app.core.logger import logger
+from app.core.logger import ForwardingHandler, logger
 from app.models.schemas import (
     Clip,
     ClipList,
@@ -24,15 +28,107 @@ from app.services.clip_manager import (
 )
 from app.services.llm_analyzer import analyze_viral_potential, generate_social_package
 from app.services.transcription import transcribe_audio
-from app.services.video_engine import create_social_cover, extract_safe_audio, render_clips
+from app.services.video_engine import (
+    EXPORT_CLIP_SOCIAL_FILENAME,
+    EXPORT_CLIP_VIDEO_FILENAME,
+    clip_session_subdirectory,
+    create_social_cover,
+    extract_safe_audio,
+    render_clips,
+)
+
+
+def _ffprobe_format_tags(video_path: Path) -> dict[str, str]:
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode != 0 or not (proc.stdout or "").strip():
+            return {}
+        data = json.loads(proc.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {}
+    fmt = data.get("format") or {}
+    tags = fmt.get("tags") or {}
+    out: dict[str, str] = {}
+    for k, v in tags.items():
+        if v is not None and str(v).strip():
+            out[str(k)] = str(v)
+    return out
+
+
+def _video_description_folder_label(video_path: Path) -> str:
+    """
+    Nome lógico do vídeo para a pasta do projeto: metadados (título/descrição)
+    ou nome do ficheiro sem extensão.
+    """
+    tags = _ffprobe_format_tags(video_path)
+    for key in (
+        "title",
+        "TITLE",
+        "description",
+        "DESCRIPTION",
+        "comment",
+        "COMMENT",
+        "synopsis",
+    ):
+        raw = tags.get(key)
+        if raw:
+            t = str(raw).strip().split("\n")[0].strip()
+            if t:
+                return t
+    return video_path.stem
+
+
+def _sanitize_dir_segment(name: str, max_len: int = 120) -> str:
+    name = (name or "").strip()
+    if not name:
+        name = "projeto"
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    name = name.rstrip(". ")
+    if not name:
+        name = "projeto"
+    return name[:max_len]
+
+
+def _unique_project_subdir(base: Path, video_path: Path) -> Path:
+    label = _sanitize_dir_segment(_video_description_folder_label(video_path))
+    candidate = base / label
+    if not candidate.exists():
+        return candidate
+    for n in range(1, 1000):
+        alt = base / f"{label}_{n}"
+        if not alt.exists():
+            return alt
+    return base / f"{label}_{re.sub(r'[^0-9]', '', str(time.time()))}"
+
 
 class VideoProcessorThread(QThread):
     """
     Thread dedicada ao processamento intensivo de vídeo e IA.
-    Agora orquestra serviços desacoplados.
+    Orquestra serviços desacoplados.
+
+    Sinais: ``progress_signal`` (etapas com prefixo > na UI); ``log_signal`` (logging
+    espelhado do terminal); ``progress_update`` (barra: valor, máximo; máximo 0 =
+    indeterminado).
     """
 
     progress_signal = Signal(str)
+    log_signal = Signal(str)
+    progress_update = Signal(int, int)
     finished_signal = Signal(str)
     error_signal = Signal(str)
     clips_ready_signal = Signal(list)  # Lista de dicts para compatibilidade com UI
@@ -67,11 +163,12 @@ class VideoProcessorThread(QThread):
         self.model_name = model_name
         self.llm_provider = llm_provider
         self.llm_api_key = llm_api_key
-        self.output_dir = (
+        base_out = (
             Path(output_dir)
             if output_dir
             else config.EXPORTS_ROOT / f"{self.video_path.stem}_processed"
         )
+        self.output_dir = _unique_project_subdir(base_out.resolve(), self.video_path)
         self.prompt_type = prompt_type
         self.whisper_model = whisper_model
         self.whisper_device_mode = whisper_device_mode
@@ -155,12 +252,28 @@ class VideoProcessorThread(QThread):
         if not self.check_dependencies():
             return
 
+        root_log = logging.getLogger()
+        ui_handler = ForwardingHandler(self.log_signal.emit)
+        ui_handler.setLevel(logging.INFO)
+        ui_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s - %(levelname)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        root_log.addHandler(ui_handler)
+
         try:
+            self.progress_update.emit(0, 0)
             self.metrics.start_time = time.time()
             self.output_dir.mkdir(parents=True, exist_ok=True)
+            self.progress_signal.emit(
+                f"Pasta deste projeto: «{self.output_dir.name}» (título/descrição do vídeo; destino base: {self.output_dir.parent})."
+            )
 
             # Fase 0 - extração de áudio
             self.progress_signal.emit("Preparando arquivo de áudio (FFmpeg)...")
+            self.progress_update.emit(0, 0)
             temp_audio_path = extract_safe_audio(self.video_path, self.output_dir)
 
             # Fase 1 - transcrição
@@ -171,6 +284,7 @@ class VideoProcessorThread(QThread):
                 self.progress_signal.emit(
                     f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
                 )
+                self.progress_update.emit(0, 0)
                 segments, max_video_duration = transcribe_audio(
                     temp_audio_path,
                     model_name=self.whisper_model,
@@ -184,6 +298,7 @@ class VideoProcessorThread(QThread):
                 self.progress_signal.emit(
                     f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
                 )
+                self.progress_update.emit(0, 0)
                 segments, max_video_duration = transcribe_audio(
                     temp_audio_path,
                     model_name=self.whisper_model,
@@ -210,6 +325,7 @@ class VideoProcessorThread(QThread):
                 self.progress_signal.emit(
                     f"Transcrição com Whisper em AUTO: {whisper_device.upper()} ({whisper_compute})."
                 )
+                self.progress_update.emit(0, 0)
                 segments, max_video_duration = transcribe_audio(
                     temp_audio_path,
                     model_name=self.whisper_model,
@@ -243,6 +359,10 @@ class VideoProcessorThread(QThread):
             # Fase 3 - análise via LLM
             all_clips: List[Clip] = []
             total_chapters = len(chapters)
+            if total_chapters > 0:
+                self.progress_update.emit(0, total_chapters)
+            else:
+                self.progress_update.emit(0, 0)
 
             for i, chunk in enumerate(chapters, start=1):
                 self.progress_signal.emit(
@@ -275,6 +395,9 @@ class VideoProcessorThread(QThread):
                         )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("Clipe descartado por dados inválidos: %s", e)
+
+                if total_chapters > 0:
+                    self.progress_update.emit(i, total_chapters)
 
             self.metrics.analysis_time = time.time() - analysis_start
 
@@ -317,16 +440,19 @@ class VideoProcessorThread(QThread):
                     "Aviso: A IA não encontrou nenhum clipe viral forte o suficiente."
                 )
                 logger.warning(
-                    # TODO: Alerta de erro do num_ctx é necessário ser melhorado
-                    "Nenhum clipe encontrado. Verifique se o Ollama está rodando (`ollama serve`) e se o modelo '%s' "
-                    f"está instalado (`ollama pull {self.model_name}`). num_ctx atual: {LLMParams.NUM_CTX}.",
+                    "Nenhum clipe encontrado (modelo=%s, num_ctx=%s). "
+                    "Se usar Ollama: confirme `ollama serve` e `ollama pull %s`.",
                     self.model_name,
+                    LLMParams.NUM_CTX,
                     self.model_name,
                 )
                 self.finished_signal.emit(
                     "Processamento concluído sem clipes extraídos."
                 )
                 return
+
+            if total_chapters > 0:
+                self.progress_update.emit(total_chapters, total_chapters)
 
             # Envia para UI (como lista de dicts)
             self.progress_signal.emit(
@@ -335,6 +461,7 @@ class VideoProcessorThread(QThread):
             self.clips_ready_signal.emit([c.to_dict() for c in all_clips])
 
             # Espera seleção do usuário
+            self.progress_update.emit(0, 0)
             while self.selected_clips is None:
                 time.sleep(0.5)
 
@@ -344,9 +471,11 @@ class VideoProcessorThread(QThread):
                 return
 
             # Fase 5 - renderização apenas dos selecionados
+            n_render = len(self.selected_clips)
             self.progress_signal.emit(
-                f"Iniciando renderização de {len(self.selected_clips)} clipes selecionados..."
+                f"Iniciando renderização de {n_render} clipes selecionados..."
             )
+            self.progress_update.emit(0, n_render)
             rendering_start = time.time()
             render_clips(
                 video_path=self.video_path,
@@ -360,7 +489,10 @@ class VideoProcessorThread(QThread):
                 enable_tiktok_captions=self.enable_tiktok_captions,
                 bitrate=self.bitrate or None,
                 tiktok_caption_style=self.tiktok_caption_style,
+                on_clip_progress=lambda done, total: self.progress_update.emit(done, total),
             )
+            if n_render > 0:
+                self.progress_update.emit(n_render, n_render)
 
             self.metrics.rendering_time = time.time() - rendering_start
             self.metrics.clips_selected = len(self.selected_clips)
@@ -377,7 +509,10 @@ class VideoProcessorThread(QThread):
                     f"{social_model}"
                     + (" — com capa JPG." if self.generate_social_cover else " — sem capa JPG.")
                 )
+                n_soc = len(self.selected_clips)
+                self.progress_update.emit(0, n_soc)
                 for i, clip in enumerate(self.selected_clips, start=1):
+                    clip_dir = clip_session_subdirectory(self.output_dir, i)
                     clip_text = self._build_clip_transcript_text(clip, segments)
                     narrative = self._build_narrative_context_up_to(
                         segments, until_abs=float(clip.end)
@@ -407,7 +542,7 @@ class VideoProcessorThread(QThread):
                     if self.generate_social_cover:
                         cover_path = create_social_cover(
                             video_path=self.video_path,
-                            output_dir=self.output_dir,
+                            output_dir=clip_dir,
                             clip_index=i,
                             frame_second_abs=frame_second_abs,
                             hook_phrase=hook,
@@ -424,10 +559,10 @@ class VideoProcessorThread(QThread):
                         cover_line = "(capa desativada na aba Pacote Social)"
                         cover_log = "sem capa"
 
-                    social_path = self.output_dir / f"clip_{i}_social.txt"
+                    social_path = clip_dir / EXPORT_CLIP_SOCIAL_FILENAME
                     social_path.write_text(
                         (
-                            f"Clipe: clip_{i}_viral.mp4\n"
+                            f"Clipe: {EXPORT_CLIP_VIDEO_FILENAME}\n"
                             f"Capa: {cover_line}\n"
                             f"Frase de impacto: {hook}\n\n"
                             "Descrição para redes:\n"
@@ -436,8 +571,9 @@ class VideoProcessorThread(QThread):
                         encoding="utf-8",
                     )
                     self.progress_signal.emit(
-                        f"Pacote social do clipe {i} pronto ({cover_log} + {social_path.name})."
+                        f"Pacote social em {clip_dir.name}/ ({cover_log} + {social_path.name})."
                     )
+                    self.progress_update.emit(i, n_soc)
             else:
                 self.progress_signal.emit(
                     "Pacote social desativado: sem contexto narrativo extra, capa nem ficheiros social."
@@ -452,4 +588,6 @@ class VideoProcessorThread(QThread):
         except Exception as e:  # noqa: BLE001
             logger.exception("Erro inesperado no pipeline.")
             self.error_signal.emit(f"Erro inesperado: {e}")
+        finally:
+            root_log.removeHandler(ui_handler)
 

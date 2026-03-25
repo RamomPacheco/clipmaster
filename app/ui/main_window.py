@@ -97,6 +97,7 @@ class ViralApp(QMainWindow):
         self.setMinimumSize(920, 680)
         self.current_video_path: str | None = None
         self.output_folder_path: str | None = None
+        self._last_session_output_dir: Path | None = None
         self.worker: VideoProcessorThread | None = None
         self._api_key_store = ApiKeyStore()
         self._export_preview_pixmap = QPixmap()
@@ -1288,7 +1289,7 @@ class ViralApp(QMainWindow):
         self.chk_enable_social_package.setChecked(True)
         self.chk_enable_social_package.setToolTip(
             "Se desativar, o fluxo termina só com os vídeos dos clipes — sem IA extra, "
-            "sem contexto narrativo longo e sem ficheiros clip_N_social / capa."
+            "sem contexto narrativo longo e sem descricao_redes.txt / capa.jpg por pasta de clipe."
         )
         self.chk_enable_social_package.toggled.connect(self._apply_social_package_controls_state)
         self.chk_enable_social_package.toggled.connect(self._update_social_cover_preview)
@@ -1369,7 +1370,7 @@ class ViralApp(QMainWindow):
         self.chk_social_cover = QCheckBox("Gerar imagem de capa (JPG)")
         self.chk_social_cover.setChecked(True)
         self.chk_social_cover.setToolTip(
-            "Se desmarcar, só são gerados o texto social (clip_N_social.txt), sem clip_N_capa.jpg."
+            "Se desmarcar, só é gerado o texto social (descricao_redes.txt na pasta de cada clipe), sem capa.jpg."
         )
         self.chk_social_cover.toggled.connect(self._apply_social_package_controls_state)
         self.chk_social_cover.toggled.connect(self._update_social_cover_preview)
@@ -1718,7 +1719,9 @@ class ViralApp(QMainWindow):
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setMinimumHeight(20)
+        self.progress_bar.setMaximumHeight(24)
+        self.progress_bar.setFormat("%p%")
 
         self.btn_action = QPushButton("Iniciar corte viral")
         self.btn_action.setObjectName("primaryAction")
@@ -1955,6 +1958,8 @@ class ViralApp(QMainWindow):
         if not self.current_video_path:
             return
 
+        self._last_session_output_dir = None
+
         model_selected = self.combo_model.currentText()
         provider_selected = self._current_llm_provider()
         if provider_selected == "ollama":
@@ -2072,6 +2077,8 @@ class ViralApp(QMainWindow):
             tiktok_caption_style=self._tiktok_caption_style_for_worker(),
         )
         self.worker.progress_signal.connect(self.update_log)
+        self.worker.log_signal.connect(self.append_engine_log)
+        self.worker.progress_update.connect(self.update_processing_progress)
         self.worker.finished_signal.connect(self.on_finished)
         self.worker.error_signal.connect(self.on_error)
         self.worker.clips_ready_signal.connect(self.on_clips_ready)
@@ -2079,6 +2086,35 @@ class ViralApp(QMainWindow):
 
     def update_log(self, text: str) -> None:
         self.log_output.append(f"> {text}")
+
+    def append_engine_log(self, text: str) -> None:
+        """Linhas do módulo logging (mesmo formato que no terminal)."""
+        self.log_output.append(text)
+
+    def update_processing_progress(self, current: int, maximum: int) -> None:
+        """Atualiza a barra: ``maximum`` 0 ou negativo = indeterminado (pulsação)."""
+        self.progress_bar.setVisible(True)
+        if maximum <= 0:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setTextVisible(False)
+            self.progress_bar.setStyleSheet(
+                """
+                QProgressBar { background-color: #2d2d30; border-radius: 4px; border: none; }
+                QProgressBar::chunk { background-color: #3b8eea; border-radius: 4px; }
+            """
+            )
+            return
+        capped = min(max(current, 0), maximum)
+        self.progress_bar.setRange(0, maximum)
+        self.progress_bar.setValue(capped)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat(f"%p% — {capped}/{maximum}")
+        self.progress_bar.setStyleSheet(
+            """
+            QProgressBar { background-color: #2d2d30; border-radius: 4px; border: none; height: 20px; }
+            QProgressBar::chunk { background-color: #3b8eea; border-radius: 4px; }
+        """
+        )
 
     def on_clips_ready(self, clips_dicts: list[dict]) -> None:
         if self.chk_skip_preview.isChecked():
@@ -2107,10 +2143,22 @@ class ViralApp(QMainWindow):
 
     def on_error(self, error_msg: str) -> None:
         self.log_output.append(f"\n[!] ERRO CRÍTICO:\n{error_msg}")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Erro")
+        self.progress_bar.setStyleSheet(
+            """
+            QProgressBar { background-color: #2d2d30; border-radius: 4px; border: none; }
+            QProgressBar::chunk { background-color: #c0392b; border-radius: 4px; }
+        """
+        )
         self._unlock_ui_after_process()
         self.btn_action.setText("Tentar Novamente")
 
     def on_finished(self, msg: str) -> None:
+        if self.worker is not None:
+            self._last_session_output_dir = self.worker.output_dir
         self.log_output.append(f"\n[+] {msg}")
         self._unlock_ui_after_process()
 
@@ -2131,7 +2179,9 @@ class ViralApp(QMainWindow):
 
     def _open_output_folder(self) -> None:
         try:
-            if self.output_folder_path:
+            if self._last_session_output_dir is not None:
+                target = Path(self._last_session_output_dir)
+            elif self.output_folder_path:
                 target = Path(self.output_folder_path)
             elif self.current_video_path:
                 target = config.EXPORTS_ROOT / f"{Path(self.current_video_path).stem}_processed"

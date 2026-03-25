@@ -5,7 +5,7 @@ import shutil
 import textwrap
 from pathlib import Path
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app.core.logger import logger
 from app.models.schemas import Clip, SocialCoverStyle, TiktokCaptionStyle
@@ -17,6 +17,17 @@ PROFILE_MAP = {
     "4K (2160p)": {"preset": "slow", "crf": "18", "height": 2160},
 }
 FALLBACK_PROFILE = {"preset": "medium", "crf": "21", "height": 1080}
+
+# Exportação: <pasta do projeto>/clip_01/clipe.mp4, capa.jpg, descricao_redes.txt
+CLIP_SESSION_SUBDIR_FMT = "clip_{:02d}"
+EXPORT_CLIP_VIDEO_FILENAME = "clipe.mp4"
+EXPORT_CLIP_COVER_FILENAME = "capa.jpg"
+EXPORT_CLIP_SOCIAL_FILENAME = "descricao_redes.txt"
+
+
+def clip_session_subdirectory(session_root: Path, clip_index: int) -> Path:
+    """Subpasta dedicada a um clipe (índice base 1)."""
+    return session_root / CLIP_SESSION_SUBDIR_FMT.format(clip_index)
 
 
 def _ffmpeg_has_encoder(encoder: str) -> bool:
@@ -605,7 +616,7 @@ def create_social_cover(
     Usa FFmpeg + texto (textfile) para evitar falhas com caracteres especiais no drawtext.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    cover_path = output_dir / f"clip_{clip_index}_capa.jpg"
+    cover_path = output_dir / EXPORT_CLIP_COVER_FILENAME
     target_w, target_h = get_export_dimensions(resolution, export_quality, aspect_ratio)
 
     hook_line = (hook_phrase or "").strip().replace("\r", " ").replace("\n", " ")[:400]
@@ -786,11 +797,18 @@ def render_clips(
     enable_tiktok_captions: bool = False,
     bitrate: str | None = None,
     tiktok_caption_style: Optional[TiktokCaptionStyle] = None,
+    *,
+    on_clip_progress: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """
     Renderiza uma lista de clipes para MP4 H.264, mantendo a mesma lógica do código original.
+    ``on_clip_progress``: chamado após cada clipe com (índice atual, total), índice base 1.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    clip_list = list(clips)
+    n_clips = len(clip_list)
+    if n_clips == 0:
+        return
 
     profile = PROFILE_MAP.get(export_quality) or PROFILE_MAP.get(resolution) or FALLBACK_PROFILE
     target_w, target_h = get_export_dimensions(resolution, export_quality, aspect_ratio)
@@ -815,7 +833,9 @@ def render_clips(
     def ass_escape(text: str) -> str:
         return text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
 
-    def build_tiktok_ass_for_clip(clip: Clip, clip_index: int) -> Path | None:
+    def build_tiktok_ass_for_clip(
+        clip: Clip, clip_index: int, work_dir: Path
+    ) -> Path | None:
         if not segments:
             return None
         #TODO: Ajustar a legenda para o TikTok
@@ -838,7 +858,7 @@ def render_clips(
                 )
         words = [w for w in words if w["word"] and w["end"] > w["start"]]
 
-        ass_path = output_dir / f"clip_{clip_index}_captions.ass"
+        ass_path = work_dir / "clipe_captions.ass"
         lines: List[str] = []
         if words:
             groups = [words[idx : idx + 4] for idx in range(0, len(words), 4)]
@@ -901,13 +921,20 @@ def render_clips(
         ass_path.write_text(ass_content, encoding="utf-8")
         return ass_path
 
-    for i, clip in enumerate(clips, start=1):
-        output_file = output_dir / f"clip_{i}_viral.mp4"
-        logger.info("Renderizando clipe %s em %s", i, output_file)
+    for i, clip in enumerate(clip_list, start=1):
+        clip_dir = clip_session_subdirectory(output_dir, i)
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        output_file = clip_dir / EXPORT_CLIP_VIDEO_FILENAME
+        logger.info(
+            "Renderizando clipe %s/%s → %s",
+            i,
+            n_clips,
+            output_file,
+        )
 
         ass_path: Path | None = None
         if enable_tiktok_captions:
-            ass_path = build_tiktok_ass_for_clip(clip, i)
+            ass_path = build_tiktok_ass_for_clip(clip, i, clip_dir)
             if ass_path:
                 logger.info("Legenda preparada para clipe %s (%s).", i, ass_path.name)
             else:
@@ -916,9 +943,7 @@ def render_clips(
         # Estratégia em duas etapas:
         # 1) render base (corte/enquadramento) sem legenda;
         # 2) burn-in da legenda no vídeo já renderizado.
-        base_output_file = (
-            output_dir / f"clip_{i}_base.mp4" if ass_path else output_file
-        )
+        base_output_file = clip_dir / "clipe_base.mp4" if ass_path else output_file
 
         cmd = [
             "ffmpeg",
@@ -982,7 +1007,7 @@ def render_clips(
                 stderr=subprocess.PIPE,
                 text=True,
                 check=True,
-                cwd=str(output_dir),
+                cwd=str(clip_dir),
             )
         except subprocess.CalledProcessError as e:
             err_tail = "\n".join((e.stderr or "").splitlines()[-25:])
@@ -1018,7 +1043,7 @@ def render_clips(
                     stderr=subprocess.PIPE,
                     text=True,
                     check=True,
-                    cwd=str(output_dir),
+                    cwd=str(clip_dir),
                 )
             except subprocess.CalledProcessError:
                 # Fallback para builds do FFmpeg onde subtitles falha com .ass.
@@ -1032,7 +1057,7 @@ def render_clips(
                         stderr=subprocess.PIPE,
                         text=True,
                         check=True,
-                        cwd=str(output_dir),
+                        cwd=str(clip_dir),
                     )
                 except subprocess.CalledProcessError as e2:
                     err_tail = "\n".join((e2.stderr or "").splitlines()[-25:])
@@ -1051,4 +1076,8 @@ def render_clips(
                 logger.info("FFmpeg (clipe %s) log final:\n%s", i, tail)
         if ass_path and ass_path.exists():
             ass_path.unlink(missing_ok=True)
+
+        if on_clip_progress is not None:
+            on_clip_progress(i, n_clips)
+        logger.info("Clipe %s/%s concluído.", i, n_clips)
 
