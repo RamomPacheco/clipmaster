@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title ClipMaster - AI Viral Clipper Pro
+title ClipMaster
 
 :: Sempre executa a partir da pasta onde o .bat está (raiz do projeto)
 cd /d "%~dp0"

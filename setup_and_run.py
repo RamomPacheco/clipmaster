@@ -83,7 +83,7 @@ def run_app():
         print("[!] Erro: main.py não encontrado na raiz do projeto.")
         sys.exit(1)
 
-    print("[*] Iniciando o AI Viral Clipper Pro...")
+    print("[*] Iniciando o ClipMaster...")
     print("-" * 40)
 
     # Roda o main.py. O processo atual ficará "preso" aqui até o main.py ser fechado.
@@ -92,7 +92,7 @@ def run_app():
 
 if __name__ == "__main__":
     print("=" * 40)
-    print("   AI Viral Clipper Pro - Lançador   ")
+    print("   ClipMaster - Lançador   ")
     print("=" * 40)
 
     setup_environment()

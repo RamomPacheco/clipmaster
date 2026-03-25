@@ -93,7 +93,7 @@ class _ExportPreviewThread(QThread):
 class ViralApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("AI Viral Clipper Pro")
+        self.setWindowTitle("ClipMaster")
         self.setMinimumSize(920, 680)
         self.current_video_path: str | None = None
         self.output_folder_path: str | None = None
@@ -999,7 +999,7 @@ class ViralApp(QMainWindow):
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(20, 0, 20, 0)
         header_layout.setSpacing(0)
-        lbl_title = QLabel("AI Viral Clipper Pro")
+        lbl_title = QLabel("ClipMaster")
         lbl_title.setObjectName("appHeaderTitle")
         header_layout.addWidget(lbl_title, alignment=Qt.AlignVCenter | Qt.AlignLeft)
         header_layout.addStretch()
