@@ -4,11 +4,14 @@
 
 ## 📋 What is it?
 
-**ClipMaster** is a Python desktop application that automates the generation of viral clips from long videos. It works through:
+**ClipMaster** (window title: *AI Viral Clipper Pro*) is a Python desktop application that automates viral-style short clips from long videos. It works through:
 
-1. **Transcription with Faster-Whisper** -Extract audio and convert to text
-2. **Analysis with Ollama (Local AI)** -Read the text and identify the best moments
-3. **Rendering with FFmpeg** -Cut and export clips in MP4 H.264
+1. **Transcription (Faster-Whisper)** — extracts audio and converts it to timestamped text  
+2. **AI analysis** — finds strong clip candidates; supports **Ollama** (local), **Gemini**, and **Groq** (API key in the app)  
+3. **Rendering (FFmpeg)** — cuts and exports **H.264** MP4 (optional **NVENC** when available), with optional TikTok-style burned-in captions  
+4. **Optional social package** — per-clip description text and **JPG cover** image for social posts  
+
+During processing, the UI shows a **progress bar** (per phase: analysis chunks, render, social) and an optional **log panel** that mirrors **terminal-style** `logging` output (transcription, FFmpeg messages, HTTP client logs, etc.).
 
 ---
 ### 💙 [If you liked it, make a donation ☕](https://livepix.gg/ramompacheco)
@@ -32,20 +35,21 @@ python --version # Check if it is 3.10+
      ffmpeg -version
      ```
 
-3. **Ollama** (para a IA local)
-   - Download: https://ollama.ai
-   - After installing, run in the terminal:
+3. **Ollama** (optional — for local LLM analysis)
+   - Download: https://ollama.ai  
+   - After installing:
      ```powershell
-     ollama pull phi4 # Model with best answer 
-     ollama serves # Run the server (in another terminal)
-     ```
+     ollama pull phi4   # or another model you select in the app
+     ollama serve       # run the server (separate terminal)
+     ```  
+   For **Gemini** or **Groq**, configure the API key in the application instead.
 
 ### Project Installation
 
-1. **Clone/Join project**
+1. **Clone / enter the project**
 ```powershell
 git clone https://github.com/RamomPacheco/clipmaster.git
-clipmaster cd
+cd clipmaster
 ```
 
 2. **Create virtual environment (first time)**
@@ -61,7 +65,7 @@ Linux/Mac:
 source .venv/bin/activate
 ```
 
-4. **Instalar dependências**
+4. **Install dependencies**
 ```powershell
 pip install -r requirements.txt
 ```
@@ -79,23 +83,36 @@ python main.py
 
 The graphical interface will open. Follow the steps:
 
-1. **Select video** -Click "Select Input Video"
-2. **Choose AI model** -Dropdown of available Ollama templates
-3. **Choose transcription model (Whisper)** -Dropdown with `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`
-4. **Select analysis type**:
-   - Standard (Balanced) -For general content
-   - Humor & Comedy -Prioritizes funny moments
-   - Serious & High Value -Focuses on serious/educational content
-5. **Click "Start Engine"** -Processing begins
-6. **Review and select clips** -A window shows the found clips
-7. **Save clips** -Export to MP4s in high quality
+1. **Select video** — drag-and-drop or browse  
+2. **Output folder** (optional) — default: `exports/{video_stem}_processed` under the project  
+3. **LLM provider** — Ollama, Gemini, or Groq (+ model names as shown in the UI)  
+4. **Whisper model** — e.g. `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`  
+5. **Prompt / analysis type** — balanced, humor, educational, etc.  
+6. **Start processing** — primary action button on the main screen  
+7. **Review and select clips** (unless “skip preview” is enabled) — dialog lists AI suggestions  
+8. **Exports** — high-quality MP4s plus optional social files (see below)  
+9. **Logs** — enable *Show logs terminal* to see the same detail as the console; watch the **progress bar** during transcription, LLM chunks, rendering, and social generation  
 
-### Output Files
+### Output folder layout
 
-The generated clips go to:
+Everything is written under **the folder you chose** (or the default export base). The app creates **one project subfolder** named from **video metadata** (title / description / comment in the file tags when present; otherwise the **filename without extension**). If that name already exists, a numeric suffix is added (`_1`, `_2`, …).
+
+Inside that project folder, each exported clip has **its own subdirectory** `clip_01`, `clip_02`, …:
+
 ```
-output folder of your choice in the app
+{your_output_or_exports/...}/{Project Name From Metadata}/
+├── temp_audio_safe.wav          # present only during run; usually deleted after transcription
+├── clip_01/
+│   ├── clipe.mp4                # final vertical/exported clip
+│   ├── capa.jpg                 # optional — social cover
+│   └── descricao_redes.txt      # optional — hook + description for posts
+├── clip_02/
+│   ├── clipe.mp4
+│   ...
+└── ...
 ```
+
+Without the social package, you still get `clip_XX/clipe.mp4`; cover and `descricao_redes.txt` are omitted when that feature is disabled.
 
 ---
 
@@ -114,7 +131,7 @@ clipmaster/
 │ │ └── schemas.py # Data types (Clip, Metrics, etc)
 │ ├── services/
 │ │ ├── transcription.py # Whisper -convert audio to text
-│ │ ├── llm_analyzer.py # Ollama -content analysis
+│ │ ├── llm_analyzer.py # LLM analysis (Ollama / Gemini / Groq / …)
 │ │ ├── video_engine.py # FFmpeg -cropping videos
 │ │ └── clip_manager.py # Clip management
 │ ├── ui/
@@ -141,12 +158,10 @@ CHUNK_SECONDS #600s = 10 minutes (splits video into chunks)
 DEFAULT_LLM_MODEL # "llama3.2:3b" (default AI)
 ```
 
-### 2. **core/logger.py**-Log System
+### 2. **core/logger.py** — logging
 ```python
-configure_logging() # Initialize logger
-logger.info() # Informational messages
-logger.warning() # Warnings
-logger.error() # Errors
+configure_logging()           # root-style messages to the console
+logger / ForwardingHandler    # during a job, the worker can attach a handler so INFO+ logs also appear in the UI log panel
 ```
 
 ### 3. **models/schemas.py**-Data Structures
@@ -358,26 +373,24 @@ class ClipSelectionDialog(QDialog):
 ↓
 3️⃣ User selects video + model + type
         ↓
-4️⃣ Click "Start Engine"
+4️⃣ Start processing (primary button)
         ↓
-5️⃣ VideoProcessorThread starts:
-        ├─ Extract audio (FFmpeg) → temp_audio.wav
-        ├─ Transcribe (Whisper) → text with timestamps
-        ├─ Divide into 10 min chunks
-        ├─ Send to Ollama (IA)
-├─ Receive clip suggestions
-        ├─ Remove duplicates
-        └─ Forces duration limits
+5️⃣ VideoProcessorThread runs:
+        ├─ Extract audio (FFmpeg) → temporary WAV in the project folder
+        ├─ Transcribe (Whisper) → segments with timestamps
+        ├─ Chunk transcript (e.g. 10 min) → one LLM call per chunk
+        ├─ LLM (Ollama / Gemini / Groq) returns candidate ranges
+        ├─ Validate, snap to transcript, dedupe, enforce duration limits
         ↓
-6️⃣ Interface shows clips (ClipSelectionDialog)
-↓
-7️⃣ User marks which ones they want to save
+6️⃣ Interface shows clips (ClipSelectionDialog), unless preview skip is on
         ↓
-8️⃣ Renders all marked (FFmpeg)
+7️⃣ User selects which clips to export
         ↓
-9️⃣ Saves in exports/VIDEO_processed/
+8️⃣ Renders selected clips (FFmpeg, per `clip_XX/clipe.mp4`)
         ↓
-🔟 Success! Ready-made MP4 clips
+9️⃣ Optional: social package (text + JPG cover per folder)
+        ↓
+🔟 Done — project folder under your chosen output path
 ```
 
 ---
@@ -440,10 +453,10 @@ choco install ffmpeg
 ```
 
 ### Error: Ollama does not connect
-**Solution**: Make sure Ollama server is running:
+**Solution**: Make sure the Ollama server is running:
 ```powershell
 # In another terminal:
-ollama serves
+ollama serve
 ```
 
 ### Whisper very slow
@@ -461,11 +474,16 @@ ollama serves
 
 ```
 exports/
-└── my_video_processed/
-├── clip_1_viral.mp4 # 45 seconds
-    ├── clip_2_viral.mp4 # 38 seconds
-    ├── clip_3_viral.mp4 # 52 seconds
-    └── description_e_insights.txt # Summary generated
+└── My_Video_processed/                    # default base if you did not pick a folder
+    └── Interview With Guest/              # folder name from metadata title (or filename)
+        ├── clip_01/
+        │   ├── clipe.mp4
+        │   ├── capa.jpg
+        │   └── descricao_redes.txt
+        ├── clip_02/
+        │   ├── clipe.mp4
+        │   └── ...
+        └── ...
 ```
 
 ---

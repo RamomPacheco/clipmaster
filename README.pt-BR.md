@@ -6,11 +6,14 @@
 
 ## 📋 O que é?
 
-**ClipMaster** é uma aplicação desktop Python que automatiza a geração de clipes virais a partir de vídeos longos. Funciona através de:
+**ClipMaster** (título da janela: *AI Viral Clipper Pro*) é uma aplicação desktop em Python que gera clipes curtos estilo “viral” a partir de vídeos longos. Funciona assim:
 
-1. **Transcrição com Faster-Whisper** - Extrai o áudio e converte em texto
-2. **Análise com Ollama (IA Local)** - Lê o texto e identifica os melhores momentos
-3. **Renderização com FFmpeg** - Corta e exporta os clipes em MP4 H.264
+1. **Transcrição (Faster-Whisper)** — extrai o áudio e produz texto com marcas de tempo  
+2. **Análise por IA** — sugere os melhores trechos; suporta **Ollama** (local), **Gemini** e **Groq** (chave API na app)  
+3. **Renderização (FFmpeg)** — corta e exporta MP4 em **H.264** (opcional **NVENC** se disponível), com legendas estilo TikTok opcionais  
+4. **Pacote social opcional** — por clipe: texto para publicar e imagem de **capa JPG**  
+
+Durante o processamento, a interface mostra uma **barra de progresso** (por fase: análise em blocos, renderização, pacote social) e um **painel de logs** opcional (*Mostrar terminal de logs*) que espelha o output de **logging** como no terminal (transcrição, FFmpeg, cliente HTTP, etc.).
 
 ---
 ### 💙 [Se gostou, faça uma doação ☕](https://livepix.gg/ramompacheco)
@@ -34,13 +37,14 @@ python --version  # Verificar se é 3.10+
      ffmpeg -version
      ```
 
-3. **Ollama** (para a IA local)
+3. **Ollama** (opcional — para LLM local)
    - Download: https://ollama.ai
-   - Após instalar, execute no terminal:
+   - Após instalar:
      ```powershell
-     ollama pull phi4       # Modelo com melhor resposta 
-     ollama serve           # Rodar o servidor (em outro terminal)
-     ```
+     ollama pull phi4       # ou outro modelo que escolher na app
+     ollama serve           # Servidor noutro terminal
+     ```  
+   Para **Gemini** ou **Groq**, use a chave API na aplicação.
 
 ### Instalação do Projeto
 
@@ -81,23 +85,36 @@ python main.py
 
 A interface gráfica abrirá. Siga os passos:
 
-1. **Selecionar vídeo** - Clique em "Selecionar Vídeo de Entrada"
-2. **Escolher modelo de IA** - Dropdown de modelos Ollama disponíveis
-3. **Escolher modelo de transcrição (Whisper)** - Dropdown com `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`
-4. **Selecionar tipo de análise**:
-   - Padrão (Equilibrado) - Para conteúdo geral
-   - Humor & Comédia - Prioriza momentos engraçados
-   - Sério & Alto Valor - Foca em conteúdo sério/educativo
-5. **Clique em "Iniciar Motor"** - Começa o processamento
-6. **Revisar e selecionar clipes** - Uma janela mostra os clipes encontrados
-7. **Salvar clipes** - Exporte para MP4s em alta qualidade
+1. **Selecionar vídeo** — arrastar e soltar ou procurar ficheiro  
+2. **Pasta de saída** (opcional) — por defeito: `exports/{nome_do_video}_processed` na raiz do projeto  
+3. **Provedor de LLM** — Ollama, Gemini ou Groq (+ modelos conforme a UI)  
+4. **Modelo Whisper** — ex.: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo`  
+5. **Tipo de análise / prompt** — equilibrado, humor, educativo, etc.  
+6. **Iniciar processamento** — botão principal de ação  
+7. **Revisar e selecionar clipes** (salvo se “pular pré-visualização” estiver ativo) — diálogo com sugestões da IA  
+8. **Exportação** — MP4 em alta qualidade + ficheiros sociais opcionais (ver abaixo)  
+9. **Logs** — ative *Mostrar terminal de logs* para ver o mesmo detalhe que no consola; acompanhe a **barra de progresso**  
 
-### Arquivos de Saída
+### Estrutura das pastas de saída
 
-Os clipes gerados vão para:
+Tudo é gravado **na pasta base que escolheu** (ou na pasta de export por defeito). A app cria **uma subpasta de projeto** com nome derivado dos **metadados do vídeo** (título, descrição ou comentário nas tags do ficheiro; se não existir, usa o **nome do ficheiro sem extensão**). Se já existir pasta com esse nome, acrescenta sufixo numérico (`_1`, `_2`, …).
+
+Dentro dessa pasta, **cada clipe exportado** tem a sua subpasta `clip_01`, `clip_02`, …:
+
 ```
-pasta de saída de sua escolha no app
+{sua_pasta_ou_exports/...}/{Nome Do Projeto Pelos Metadados}/
+├── temp_audio_safe.wav          # só durante a execução; normalmente apagado após transcrição
+├── clip_01/
+│   ├── clipe.mp4                # vídeo final exportado
+│   ├── capa.jpg                 # opcional — capa para redes
+│   └── descricao_redes.txt      # opcional — frase de impacto + descrição
+├── clip_02/
+│   ├── clipe.mp4
+│   ...
+└── ...
 ```
+
+Sem o pacote social, mantém-se `clip_XX/clipe.mp4`; a capa e o `descricao_redes.txt` só aparecem quando essa opção está ativa.
 
 ---
 
@@ -116,7 +133,7 @@ clipmaster/
 │   │   └── schemas.py      # Tipos de dados (Clip, Metrics, etc)
 │   ├── services/
 │   │   ├── transcription.py    # Whisper - converte áudio em texto
-│   │   ├── llm_analyzer.py     # Ollama - análise de conteúdo
+│   │   ├── llm_analyzer.py     # Análise LLM (Ollama / Gemini / Groq / …)
 │   │   ├── video_engine.py     # FFmpeg - corte de vídeos
 │   │   └── clip_manager.py     # Gerenciamento de clipes
 │   ├── ui/
@@ -143,12 +160,10 @@ CHUNK_SECONDS         # 600s = 10 minutos (divide vídeo em pedaços)
 DEFAULT_LLM_MODEL     # "llama3.2:3b" (IA padrão)
 ```
 
-### 2. **core/logger.py** - Sistema de Logs
+### 2. **core/logger.py** — logs
 ```python
-configure_logging()   # Inicializa logger
-logger.info()         # Mensagens informativas
-logger.warning()      # Avisos
-logger.error()        # Erros
+configure_logging()           # mensagens para consola
+logger / ForwardingHandler    # durante um job, o worker pode anexar um handler para espelhar logs INFO+ no painel da UI
 ```
 
 ### 3. **models/schemas.py** - Estruturas de Dados
@@ -360,26 +375,24 @@ class ClipSelectionDialog(QDialog):
         ↓
 3️⃣ Usuário seleciona vídeo + modelo + tipo
         ↓
-4️⃣ Clica "Iniciar Motor"
+4️⃣ Inicia processamento (botão principal)
         ↓
-5️⃣ VideoProcessorThread começa:
-        ├─ Extrai áudio (FFmpeg) → temp_audio.wav
-        ├─ Transcreve (Whisper) → texto com timestamps
-        ├─ Divide em 10 min chunks
-        ├─ Envia para Ollama (IA)
-        ├─ Recebe sugestões de clipes
-        ├─ Remove duplicatas
-        └─ Força limites de duração
+5️⃣ VideoProcessorThread executa:
+        ├─ Extrai áudio (FFmpeg) → WAV temporário na pasta do projeto
+        ├─ Transcreve (Whisper) → segmentos com timestamps
+        ├─ Divide a transcrição em blocos (ex.: 10 min) → uma chamada LLM por bloco
+        ├─ LLM (Ollama / Gemini / Groq) devolve intervalos candidatos
+        ├─ Valida, alinha à transcrição, remove duplicados, aplica limites de duração
         ↓
-6️⃣ Interface mostra clipes (ClipSelectionDialog)
+6️⃣ Interface mostra clipes (ClipSelectionDialog), salvo modo “pular pré-visualização”
         ↓
-7️⃣ Usuário marca quais quer salvar
+7️⃣ Utilizador escolhe quais exportar
         ↓
-8️⃣ Renderiza todos marcados (FFmpeg)
+8️⃣ Renderiza os selecionados (FFmpeg → `clip_XX/clipe.mp4`)
         ↓
-9️⃣ Salva em exports/VIDEO_processed/
+9️⃣ Opcional: pacote social (texto + capa JPG por pasta)
         ↓
-🔟 Sucesso! Clipes em MP4 prontos
+🔟 Concluído — pasta do projeto dentro do destino escolhido
 ```
 
 ---
@@ -471,11 +484,16 @@ Outras opções: `WHISPER_DEVICE=cpu`, ou `WHISPER_CUDA_LOW_VRAM=1` (mantém CUD
 
 ```
 exports/
-└── meu_video_processed/
-    ├── clip_1_viral.mp4         # 45 segundos
-    ├── clip_2_viral.mp4         # 38 segundos
-    ├── clip_3_viral.mp4         # 52 segundos
-    └── descricao_e_insights.txt # Resumo gerado
+└── meu_video_processed/                 # base por defeito se não escolher pasta
+    └── Entrevista com Convidado/        # nome a partir do título nos metadados (ou nome do ficheiro)
+        ├── clip_01/
+        │   ├── clipe.mp4
+        │   ├── capa.jpg
+        │   └── descricao_redes.txt
+        ├── clip_02/
+        │   ├── clipe.mp4
+        │   └── ...
+        └── ...
 ```
 
 ---
