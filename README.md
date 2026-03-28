@@ -31,9 +31,9 @@ python --version # Check if it is 3.10+
      choco install ffmpeg
      ```
    - Check:
-```powershell
-     ffmpeg -version
-     ```
+```powershell```
+ffmpeg -version
+
 
 3. **Ollama** (optional — for local LLM analysis)
    - Download: https://ollama.ai  
