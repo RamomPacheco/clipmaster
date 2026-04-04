@@ -51,6 +51,13 @@ class Clip(BaseModel):
     end: float = Field(..., gt=0)
     reason: str = ""
     headline: str = "Sem título"
+    engagement_effects: List[str] = Field(
+        default_factory=list,
+        description=(
+            "IDs de efeitos de retenção pedidos pela IA (ex.: push_in_subtle, fade_video_edges, none). "
+            "Lista vazia = pacote padrão do app."
+        ),
+    )
 
     @property
     def duration(self) -> float:

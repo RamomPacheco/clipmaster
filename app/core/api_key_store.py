@@ -8,12 +8,14 @@ from typing import Any, Dict, List, Optional
 
 from app.core.logger import logger
 
+_API_KEY_PROVIDERS = frozenset({"gemini", "groq", "openai"})
+
 
 @dataclass
 class ApiKeyProfile:
     id: str
     label: str
-    provider: str  # "gemini" | "groq"
+    provider: str  # gemini | groq | openai
     secret: str
 
     def to_json(self) -> Dict[str, str]:
@@ -63,7 +65,7 @@ class ApiKeyStore:
             for item in raw.get("profiles", []):
                 if isinstance(item, dict):
                     p = ApiKeyProfile.from_json(item)
-                    if p and p.provider in ("gemini", "groq") and p.secret.strip():
+                    if p and p.provider in _API_KEY_PROVIDERS and p.secret.strip():
                         self._profiles.append(p)
             legacy = raw.get("last_profile_by_provider")
             if isinstance(legacy, dict):
@@ -92,7 +94,7 @@ class ApiKeyStore:
 
     def list_for_provider(self, provider: str) -> List[ApiKeyProfile]:
         p = provider.strip().lower()
-        if p not in ("gemini", "groq"):
+        if p not in _API_KEY_PROVIDERS:
             return []
         return sorted([x for x in self._profiles if x.provider == p], key=lambda x: x.label.lower())
 
@@ -109,8 +111,8 @@ class ApiKeyStore:
             provider=provider.strip().lower(),
             secret=secret.strip(),
         )
-        if prof.provider not in ("gemini", "groq"):
-            raise ValueError("provider deve ser gemini ou groq")
+        if prof.provider not in _API_KEY_PROVIDERS:
+            raise ValueError("provider deve ser gemini, groq ou openai")
         if not prof.secret:
             raise ValueError("chave vazia")
         self._profiles.append(prof)
@@ -131,7 +133,7 @@ class ApiKeyStore:
 
     def set_last_for_provider(self, provider: str, profile_id: Optional[str]) -> None:
         p = provider.strip().lower()
-        if p not in ("gemini", "groq"):
+        if p not in _API_KEY_PROVIDERS:
             return
         if profile_id:
             self._last_by_provider[p] = profile_id

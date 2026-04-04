@@ -74,9 +74,9 @@ class LLMParams:
     TOP_P = 0.9
 
 MIN_CLIP_SECONDS = 30.0
-MAX_CLIP_SECONDS = 60.0
+MAX_CLIP_SECONDS = 120.0
 
-# Chunking da transcrição (5 minutos)
+# Chunking da transcrição (~10 min por bloco; 600 s)
 CHUNK_SECONDS = 600.0
 # Sobreposição entre chunks (reduz cortes de ideia no meio entre blocos)
 CHUNK_OVERLAP_SECONDS = 30.0

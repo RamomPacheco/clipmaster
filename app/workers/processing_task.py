@@ -26,6 +26,7 @@ from app.services.clip_manager import (
     remove_duplicate_clips,
     snap_clips_to_transcript,
 )
+from app.services.engagement_effects_catalog import normalize_engagement_effect_ids
 from app.services.llm_analyzer import analyze_viral_potential, generate_social_package
 from app.services.transcription import transcribe_audio
 from app.services.video_engine import (
@@ -52,6 +53,8 @@ def _ffprobe_format_tags(video_path: Path) -> dict[str, str]:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             check=False,
         )
@@ -148,6 +151,7 @@ class VideoProcessorThread(QThread):
         aspect_ratio: str = "Vertical (9:16) - Redes sociais",
         framing_mode: str = "Manter conteúdo (com bordas)",
         enable_tiktok_captions: bool = False,
+        enable_moviepy_engagement: bool = True,
         bitrate: str = "",
         llm_max_new_tokens: int | None = None,
         custom_prompt: Optional[str] = None,
@@ -157,6 +161,8 @@ class VideoProcessorThread(QThread):
         enable_social_package: bool = True,
         social_cover_style: Optional[SocialCoverStyle] = None,
         tiktok_caption_style: Optional[TiktokCaptionStyle] = None,
+        min_clip_seconds: float | None = None,
+        max_clip_seconds: float | None = None,
     ) -> None:
         super().__init__()
         self.video_path = Path(video_path)
@@ -178,6 +184,7 @@ class VideoProcessorThread(QThread):
         self.aspect_ratio = aspect_ratio
         self.framing_mode = framing_mode
         self.enable_tiktok_captions = enable_tiktok_captions
+        self.enable_moviepy_engagement = enable_moviepy_engagement
         self.bitrate = bitrate
         self.llm_max_new_tokens = llm_max_new_tokens
         self.custom_prompt = custom_prompt
@@ -187,6 +194,16 @@ class VideoProcessorThread(QThread):
         self.enable_social_package = enable_social_package
         self.social_cover_style = social_cover_style
         self.tiktok_caption_style = tiktok_caption_style
+        self.min_clip_seconds = (
+            float(min_clip_seconds)
+            if min_clip_seconds is not None
+            else float(config.MIN_CLIP_SECONDS)
+        )
+        self.max_clip_seconds = (
+            float(max_clip_seconds)
+            if max_clip_seconds is not None
+            else float(config.MAX_CLIP_SECONDS)
+        )
 
         self.metrics = ProcessingMetrics(
             model_used=model_name,
@@ -366,7 +383,8 @@ class VideoProcessorThread(QThread):
 
             for i, chunk in enumerate(chapters, start=1):
                 self.progress_signal.emit(
-                    f"IA analisando Parte {i} de {total_chapters} (Contexto de 5 min)..."
+                    f"IA analisando Parte {i} de {total_chapters} "
+                    f"(contexto ~{int(config.CHUNK_SECONDS // 60)} min)..."
                 )
                 chunk_text = "\n".join(
                     [
@@ -391,6 +409,9 @@ class VideoProcessorThread(QThread):
                                 end=float(c.get("end", 0.0)),
                                 reason=str(c.get("reason", "")),
                                 headline=str(c.get("headline", "Sem título")),
+                                engagement_effects=normalize_engagement_effect_ids(
+                                    c.get("engagement_effects")
+                                ),
                             )
                         )
                     except Exception as e:  # noqa: BLE001
@@ -416,15 +437,15 @@ class VideoProcessorThread(QThread):
             all_clips = enforce_duration_limits(
                 all_clips,
                 max_video_duration=max_video_duration,
-                min_seconds=config.MIN_CLIP_SECONDS,
-                max_seconds=config.MAX_CLIP_SECONDS,
+                min_seconds=self.min_clip_seconds,
+                max_seconds=self.max_clip_seconds,
             )
             all_clips = snap_clips_to_transcript(all_clips, segments)
             all_clips = enforce_duration_limits(
                 all_clips,
                 max_video_duration=max_video_duration,
-                min_seconds=config.MIN_CLIP_SECONDS,
-                max_seconds=config.MAX_CLIP_SECONDS,
+                min_seconds=self.min_clip_seconds,
+                max_seconds=self.max_clip_seconds,
             )
             all_clips = remove_duplicate_clips(all_clips)
 
@@ -487,6 +508,7 @@ class VideoProcessorThread(QThread):
                 aspect_ratio=self.aspect_ratio,
                 framing_mode=self.framing_mode,
                 enable_tiktok_captions=self.enable_tiktok_captions,
+                enable_moviepy_engagement=self.enable_moviepy_engagement,
                 bitrate=self.bitrate or None,
                 tiktok_caption_style=self.tiktok_caption_style,
                 on_clip_progress=lambda done, total: self.progress_update.emit(done, total),

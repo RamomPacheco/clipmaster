@@ -26,7 +26,7 @@ class DropZone(QFrame):
         )
         layout = QVBoxLayout()
         self.lbl_text = QLabel(
-            "Arraste e solte o seu vídeo aqui\nou clique para procurar"
+            "Arraste e solte o vídeo aqui\nou clique para escolher um ficheiro no disco"
         )
         self.lbl_text.setAlignment(Qt.AlignCenter)
         self.lbl_text.setStyleSheet(

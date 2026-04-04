@@ -202,7 +202,7 @@ def enforce_duration_limits(
             )
         elif duration > max_seconds:
             logger.warning(
-                "Clipe %s excedeu o limite do YouTube Shorts (%.1fs). Cortando em %.1fs.",
+                "Clipe %s excedeu o limite máximo configurado (%.1fs). Cortando em %.1fs.",
                 i,
                 duration,
                 max_seconds,
@@ -211,7 +211,7 @@ def enforce_duration_limits(
                 update={
                     "end": round(start + max_seconds, 2),
                     "reason": clip.reason
-                    + " [Nota de Backend: Final cortado para respeitar teto de 60s]",
+                    + " [Nota de Backend: Final cortado para respeitar teto de 120s]",
                 }
             )
 

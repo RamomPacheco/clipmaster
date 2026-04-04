@@ -7,8 +7,13 @@ from typing import Any, Dict, List, Tuple
 import ollama
 from app.core.config import DEFAULT_LLM_MODEL, LLMParams
 from app.core.logger import logger
+from app.services.engagement_effects_catalog import (
+    engagement_effects_json_example_suffix,
+    engagement_effects_prompt_instruction,
+)
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 
 # Reforça alinhamento aos timestamps reais do Whisper (reduz alucinação de segundos).
 _TIMESTAMP_RULE = """
@@ -40,16 +45,19 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
             "\n\n(Obrigatório: use apenas tempos de início/fim que existam nas linhas "
             "\"[x - y]\" da transcrição; não invente segundos fora desse texto.)"
         )
-        return base_system, custom_prompt + hint
+        return base_system, custom_prompt + hint + engagement_effects_prompt_instruction()
 
+    _eng_ex = engagement_effects_json_example_suffix()
+    _eng_instr = engagement_effects_prompt_instruction()
     base_user = f"""
     Analise esta fatiada da transcrição e encontre os momentos mais magnéticos.
 
     REGRAS DE OURO (CRÍTICAS):
-    1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
+    1. DURAÇÃO (30s a 120s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 120 segundos. Não passe de 120s sob nenhuma hipótese.
     2. COERÊNCIA: O clipe deve começar no início exato do raciocínio e terminar na conclusão.
     3. FOCO: Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
     4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
+{_eng_instr}
 {_TIMESTAMP_RULE}
     --- TRANSCRIÇÃO ---
     {text}
@@ -57,7 +65,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
 
     Retorne APENAS o JSON rigoroso: 
     [
-        {{"start": 10.5, "end": 55.0, "reason": "Motivo", "headline": "Título"}}
+        {{"start": 10.5, "end": 55.0, "reason": "Motivo", "headline": "Título"{_eng_ex}}}
     ]
     """
 
@@ -74,10 +82,11 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         Analise esta fatiada da transcrição e encontre os momentos mais engraçados e humorísticos.
 
         REGRAS DE OURO (CRÍTICAS):
-        1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
+        1. DURAÇÃO (30s a 120s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 120 segundos. Não passe de 120s sob nenhuma hipótese.
         2. COERÊNCIA: O clipe deve começar no início exato da piada ou situação engraçada e terminar na conclusão.
         3. FOCO: Priorize momentos que gerem risadas, situações cômicas, ironia ou humor leve. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
+{_eng_instr}
 {_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
@@ -85,7 +94,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
 
         Retorne APENAS o JSON rigoroso: 
         [
-            {{"start": 10.5, "end": 55.0, "reason": "Motivo engraçado", "headline": "Título humorístico"}}
+            {{"start": 10.5, "end": 55.0, "reason": "Motivo engraçado", "headline": "Título humorístico"{_eng_ex}}}
         ]
         """
         return system, user
@@ -100,10 +109,11 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         Analise esta fatiada da transcrição e encontre os momentos mais sérios e valiosos.
 
         REGRAS DE OURO (CRÍTICAS):
-        1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
+        1. DURAÇÃO (30s a 120s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 120 segundos. Não passe de 120s sob nenhuma hipótese.
         2. COERÊNCIA: O clipe deve começar no início exato do raciocínio sério e terminar na conclusão valiosa.
         3. FOCO: Priorize momentos que transmitam conhecimento profundo, insights valiosos, conselhos sérios ou conteúdo impactante. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
+{_eng_instr}
 {_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
@@ -111,7 +121,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
 
         Retorne APENAS o JSON rigoroso: 
         [
-            {{"start": 10.5, "end": 55.0, "reason": "Motivo sério e valioso", "headline": "Título impactante"}}
+            {{"start": 10.5, "end": 55.0, "reason": "Motivo sério e valioso", "headline": "Título impactante"{_eng_ex}}}
         ]
         """
         return system, user
@@ -126,10 +136,11 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         Analise esta fatiada da transcrição e encontre os momentos mais emocionantes e narrativos.
 
         REGRAS DE OURO (CRÍTICAS):
-        1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
+        1. DURAÇÃO (30s a 120s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 120 segundos. Não passe de 120s sob nenhuma hipótese.
         2. COERÊNCIA: O clipe deve começar no início exato da história ou emoção e terminar na conclusão emocional.
         3. FOCO: Priorize momentos que contem histórias, gerem emoção, inspiração ou conexão emocional. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
+{_eng_instr}
 {_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
@@ -137,7 +148,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
 
         Retorne APENAS o JSON rigoroso: 
         [
-            {{"start": 10.5, "end": 55.0, "reason": "Motivo emocional", "headline": "Título inspirador"}}
+            {{"start": 10.5, "end": 55.0, "reason": "Motivo emocional", "headline": "Título inspirador"{_eng_ex}}}
         ]
         """
         return system, user
@@ -152,10 +163,11 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
         Analise esta fatiada da transcrição e encontre os momentos mais educacionais e com dicas práticas.
 
         REGRAS DE OURO (CRÍTICAS):
-        1. DURAÇÃO (30s a 60s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 60 segundos. Não passe de 60s sob nenhuma hipótese.
+        1. DURAÇÃO (30s a 120s): O clipe DEVE ter no mínimo 30 segundos. Se a ideia precisar de mais tempo para ter coerência, você DEVE aumentar a duração, mas o LIMITE ABSOLUTO E MÁXIMO é 120 segundos. Não passe de 120s sob nenhuma hipótese.
         2. COERÊNCIA: O clipe deve começar no início exato da explicação ou dica e terminar na conclusão prática.
         3. FOCO: Priorize momentos que ensinem algo novo, deem dicas práticas, expliquem conceitos ou forneçam conhecimento útil. Retorne apenas clipes geniais. Se não houver nenhum, retorne [].
         4. NÃO DUPLICAR: Não gere clipes que se sobreponham significativamente (mais de 50%) ou sejam muito similares em conteúdo. Garanta que cada clipe seja único e distinto.
+{_eng_instr}
 {_TIMESTAMP_RULE}
         --- TRANSCRIÇÃO ---
         {text}
@@ -163,7 +175,7 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
 
         Retorne APENAS o JSON rigoroso: 
         [
-            {{"start": 10.5, "end": 55.0, "reason": "Motivo educacional", "headline": "Título instrutivo"}}
+            {{"start": 10.5, "end": 55.0, "reason": "Motivo educacional", "headline": "Título instrutivo"{_eng_ex}}}
         ]
         """
         return system, user
@@ -185,7 +197,8 @@ def _extract_json_object(raw_content: str) -> Dict[str, Any]:
     return json.loads(match.group(0).strip())
 
 
-def _groq_chat_completion(
+def _openai_compatible_chat_completion(
+    chat_completions_url: str,
     system_prompt: str,
     user_prompt: str,
     model_to_use: str,
@@ -194,7 +207,10 @@ def _groq_chat_completion(
     temperature: float,
     max_tokens: int,
     json_object: bool = False,
+    env_key_fallback: str | None = None,
+    api_label: str = "API",
 ) -> str:
+    """POST /v1/chat/completions (OpenAI, Groq, Mistral, Together, base local, etc.)."""
     try:
         import httpx
     except ImportError as e:
@@ -202,9 +218,13 @@ def _groq_chat_completion(
             "Pacote 'httpx' não instalado. Execute: pip install httpx"
         ) from e
 
-    key = (api_key or "").strip() or os.environ.get("GROQ_API_KEY", "")
+    key = (api_key or "").strip()
+    if not key and env_key_fallback:
+        key = (os.environ.get(env_key_fallback) or "").strip()
     if not key:
-        raise RuntimeError("Chave API Groq em falta (campo na app ou GROQ_API_KEY).")
+        raise RuntimeError(
+            f"Chave API em falta (campo na app ou variável de ambiente para {api_label})."
+        )
 
     headers = {
         "Authorization": f"Bearer {key}",
@@ -223,7 +243,7 @@ def _groq_chat_completion(
         body["response_format"] = {"type": "json_object"}
 
     with httpx.Client(timeout=120.0) as client:
-        resp = client.post(GROQ_CHAT_COMPLETIONS_URL, headers=headers, json=body)
+        resp = client.post(chat_completions_url, headers=headers, json=body)
         try:
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -232,17 +252,65 @@ def _groq_chat_completion(
                 detail = resp.text[:500]
             except Exception:  # noqa: BLE001
                 pass
-            raise RuntimeError(f"Groq API HTTP {resp.status_code}: {detail}") from e
+            raise RuntimeError(f"{api_label} HTTP {resp.status_code}: {detail}") from e
         data = resp.json()
 
     choices = data.get("choices") or []
     if not choices:
-        raise RuntimeError("Resposta Groq sem choices.")
+        raise RuntimeError(f"Resposta {api_label} sem choices.")
     msg = choices[0].get("message") or {}
     content = msg.get("content")
     if not isinstance(content, str):
-        raise RuntimeError("Resposta Groq sem texto.")
+        raise RuntimeError(f"Resposta {api_label} sem texto.")
     return content
+
+
+def _groq_chat_completion(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    json_object: bool = False,
+) -> str:
+    return _openai_compatible_chat_completion(
+        GROQ_CHAT_COMPLETIONS_URL,
+        system_prompt,
+        user_prompt,
+        model_to_use,
+        api_key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        json_object=json_object,
+        env_key_fallback="GROQ_API_KEY",
+        api_label="Groq",
+    )
+
+
+def _openai_chat_completion(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    json_object: bool = False,
+) -> str:
+    return _openai_compatible_chat_completion(
+        OPENAI_CHAT_COMPLETIONS_URL,
+        system_prompt,
+        user_prompt,
+        model_to_use,
+        api_key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        json_object=json_object,
+        env_key_fallback="OPENAI_API_KEY",
+        api_label="OpenAI",
+    )
 
 
 def _analyze_with_groq(
@@ -252,6 +320,24 @@ def _analyze_with_groq(
     api_key: str | None = None,
 ) -> List[Dict[str, Any]]:
     raw = _groq_chat_completion(
+        system_prompt,
+        user_prompt,
+        model_to_use,
+        (api_key or "").strip(),
+        temperature=0.1,
+        max_tokens=8192,
+        json_object=False,
+    )
+    return _extract_json_array(raw)
+
+
+def _analyze_with_openai(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str | None = None,
+) -> List[Dict[str, Any]]:
+    raw = _openai_chat_completion(
         system_prompt,
         user_prompt,
         model_to_use,
@@ -376,6 +462,8 @@ def analyze_viral_potential(
             return _analyze_with_gemini(system_prompt, user_prompt, model_to_use, api_key)
         if provider == "groq":
             return _analyze_with_groq(system_prompt, user_prompt, model_to_use, api_key)
+        if provider == "openai":
+            return _analyze_with_openai(system_prompt, user_prompt, model_to_use, api_key)
         if provider == "transformers":
             return _analyze_with_transformers(
                 system_prompt,
@@ -428,10 +516,14 @@ def generate_social_package(
 
     system_prompt = (
         "Você é um estrategista de conteúdo para TikTok e Shorts. "
+        "Quem usa o texto é quem RECORTA e PUBLICA o vídeo nas redes (editor, canal, curador), "
+        "não a pessoa que aparece ou fala no vídeo original. "
+        "Use ganchos de retenção, mas sem escrever em primeira pessoa como se o redator fosse o protagonista do vídeo. "
         "Responda APENAS com JSON válido."
     )
     user_prompt = f"""
-    Tarefa: gerar pacote social para um clipe já renderizado.
+    Tarefa: gerar pacote social para um clipe já renderizado, para quem vai COLAR na publicação
+    (equipa ou pessoa que faz o recorte e posta — não o autor original do discurso no vídeo).
 
     CONTEXTO NARRATIVO (transcrição do vídeo ORIGINAL desde o início até o fim deste clipe,
     tempos absolutos em segundos — use isto para o título e a descrição fazerem sentido no conjunto):
@@ -451,8 +543,12 @@ def generate_social_package(
 
     REGRAS:
     1) hook_phrase: frase curta e forte (máx. 90 caracteres), em português, sem emojis.
-       Deve refletir o CONTEXTO NARRATIVO acima, não só as últimas frases do clipe.
+       Tom de quem divulga o trecho (terceira pessoa sobre o conteúdo, ou imperativo ao espectador),
+       nunca como se o redator fosse quem disse/fez no vídeo ("eu fiz", "eu conto", "na minha opinião"
+       como autor do vídeo). Pode convidar o público ("Não perca", "Veja o que acontece quando…").
     2) description: texto para redes sociais (2-4 linhas), com CTA de engajamento, alinhado ao contexto.
+       Perspectiva de editor/curador: comenta o que o trecho mostra ou promete, pede reação ao público.
+       Evite primeira pessoa do criador do vídeo; evite falar como se o post fosse escrito pelo falante original.
     3) frame_second: segundo RELATIVO dentro do clipe para tirar a capa.
        Deve estar entre 0 e {max(0.5, duration - 0.1):.2f}.
     4) Não invente fatos fora da transcrição.
@@ -467,8 +563,8 @@ def generate_social_package(
     fallback = {
         "hook_phrase": "O momento que muda tudo",
         "description": (
-            "Assista até o final e me diga se você concorda com esse ponto.\n"
-            "Comenta sua opinião e compartilha com quem precisa ver isso."
+            "Trecho forte do vídeo — vale assistir até o final.\n"
+            "O que achou? Comenta e compartilha com quem precisa ver esse recorte."
         ),
         "frame_second": round(min(max(duration * 0.45, 0.0), max(0.0, duration - 0.1)), 2),
     }
@@ -501,6 +597,28 @@ def generate_social_package(
                 )
             except Exception:  # noqa: BLE001
                 raw_content = _groq_chat_completion(
+                    system_prompt,
+                    user_prompt,
+                    model_to_use,
+                    (api_key or "").strip(),
+                    temperature=0.2,
+                    max_tokens=4096,
+                    json_object=False,
+                )
+            obj = _extract_json_object(raw_content)
+        elif provider == "openai":
+            try:
+                raw_content = _openai_chat_completion(
+                    system_prompt,
+                    user_prompt,
+                    model_to_use,
+                    (api_key or "").strip(),
+                    temperature=0.2,
+                    max_tokens=4096,
+                    json_object=True,
+                )
+            except Exception:  # noqa: BLE001
+                raw_content = _openai_chat_completion(
                     system_prompt,
                     user_prompt,
                     model_to_use,

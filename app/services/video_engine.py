@@ -23,6 +23,8 @@ CLIP_SESSION_SUBDIR_FMT = "clip_{:02d}"
 EXPORT_CLIP_VIDEO_FILENAME = "clipe.mp4"
 EXPORT_CLIP_COVER_FILENAME = "capa.jpg"
 EXPORT_CLIP_SOCIAL_FILENAME = "descricao_redes.txt"
+CLIP_BASE_FILENAME = "clipe_base.mp4"
+CLIP_MOVIEPY_TEMP = "_clipe_moviepy.mp4"
 
 
 def clip_session_subdirectory(session_root: Path, clip_index: int) -> Path:
@@ -43,6 +45,8 @@ def _ffmpeg_has_encoder(encoder: str) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
     except Exception:
@@ -677,6 +681,8 @@ def create_social_cover(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
             cwd=str(output_dir),
         )
@@ -797,12 +803,15 @@ def render_clips(
     enable_tiktok_captions: bool = False,
     bitrate: str | None = None,
     tiktok_caption_style: Optional[TiktokCaptionStyle] = None,
+    enable_moviepy_engagement: bool = False,
     *,
     on_clip_progress: Optional[Callable[[int, int], None]] = None,
 ) -> None:
     """
     Renderiza uma lista de clipes para MP4 H.264, mantendo a mesma lógica do código original.
     ``on_clip_progress``: chamado após cada clipe com (índice atual, total), índice base 1.
+    ``enable_moviepy_engagement``: segundo passe com MoviePy (push-in e fades só no vídeo) —
+    exige ``pip install moviepy``; se o pacote faltar, regista aviso e mantém só o encode FFmpeg.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     clip_list = list(clips)
@@ -940,10 +949,11 @@ def render_clips(
             else:
                 logger.info("Legenda não aplicada no clipe %s (sem conteúdo de legenda).", i)
 
-        # Estratégia em duas etapas:
-        # 1) render base (corte/enquadramento) sem legenda;
-        # 2) burn-in da legenda no vídeo já renderizado.
-        base_output_file = clip_dir / "clipe_base.mp4" if ass_path else output_file
+        # 1) FFmpeg: corte + enquadramento (+ eventual ficheiro base para legenda ou MoviePy).
+        # 2) Opcional: MoviePy (retenção).
+        # 3) Opcional: burn-in ASS no resultado final.
+        needs_base_file = bool(ass_path) or bool(enable_moviepy_engagement)
+        base_output_file = clip_dir / CLIP_BASE_FILENAME if needs_base_file else output_file
 
         cmd = [
             "ffmpeg",
@@ -1006,6 +1016,8 @@ def render_clips(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
                 cwd=str(clip_dir),
             )
@@ -1013,13 +1025,56 @@ def render_clips(
             err_tail = "\n".join((e.stderr or "").splitlines()[-25:])
             raise RuntimeError(f"FFmpeg falhou ao renderizar base do clipe {i}.\n{err_tail}") from e
 
+        post_path = base_output_file
+        if enable_moviepy_engagement:
+            from app.services.engagement_effects_catalog import resolve_moviepy_effect_ids
+            from app.services.moviepy_engagement import MOVIEPY_AVAILABLE, apply_engagement_effects
+
+            engagement_out = clip_dir / CLIP_MOVIEPY_TEMP
+            skip_mx = resolve_moviepy_effect_ids(clip.engagement_effects) is None
+            if skip_mx:
+                logger.info(
+                    "Clipe %s/%s: efeitos MoviePy omitidos (engagement_effects pede 'none').",
+                    i,
+                    n_clips,
+                )
+            elif MOVIEPY_AVAILABLE:
+                logger.info(
+                    "Clipe %s/%s: pós-processamento MoviePy (push-in e/ou fade no vídeo)...",
+                    i,
+                    n_clips,
+                )
+                ok_mx = apply_engagement_effects(
+                    Path(post_path),
+                    engagement_out,
+                    crf=str(profile["crf"]),
+                    preset=str(profile["preset"]),
+                    engagement_effects=clip.engagement_effects,
+                )
+                if ok_mx:
+                    if (
+                        Path(post_path).resolve() != engagement_out.resolve()
+                        and Path(post_path).exists()
+                    ):
+                        Path(post_path).unlink(missing_ok=True)
+                    post_path = engagement_out
+                else:
+                    engagement_out.unlink(missing_ok=True)
+            else:
+                logger.warning(
+                    "Efeitos de retenção (MoviePy) ligados mas o pacote não está instalado "
+                    "(pip install moviepy). Clipe %s: a ignorar este passo.",
+                    i,
+                )
+
+        proc = base_proc
         if ass_path:
             ass_for_ffmpeg = ass_path.name.replace("'", r"\'")
             subtitle_cmd = [
                 "ffmpeg",
                 "-y",
                 "-i",
-                str(base_output_file),
+                str(post_path),
                 "-vf",
                 f"subtitles=filename='{ass_for_ffmpeg}'",
                 "-c:v",
@@ -1042,6 +1097,8 @@ def render_clips(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     check=True,
                     cwd=str(clip_dir),
                 )
@@ -1056,6 +1113,8 @@ def render_clips(
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         check=True,
                         cwd=str(clip_dir),
                     )
@@ -1064,10 +1123,16 @@ def render_clips(
                     raise RuntimeError(
                         f"FFmpeg falhou ao aplicar legenda no clipe {i} (subtitles e ass).\n{err_tail}"
                     ) from e2
-            if base_output_file.exists():
-                base_output_file.unlink(missing_ok=True)
+            if (
+                Path(post_path).exists()
+                and Path(post_path).resolve() != output_file.resolve()
+            ):
+                Path(post_path).unlink(missing_ok=True)
         else:
-            proc = base_proc
+            if Path(post_path).resolve() != output_file.resolve():
+                if output_file.exists():
+                    output_file.unlink(missing_ok=True)
+                Path(post_path).replace(output_file)
 
         if enable_tiktok_captions and ass_path:
             ffmpeg_log = (proc.stderr or "").strip()

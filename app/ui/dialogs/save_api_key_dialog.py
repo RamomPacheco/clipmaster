@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -11,9 +10,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+# id usado em ApiKeyStore
+_API_OPTIONS: list[tuple[str, str]] = [
+    ("Gemini", "gemini"),
+    ("Groq", "groq"),
+    ("OpenAI", "openai"),
+]
+
 
 class SaveApiKeyDialog(QDialog):
-    """Guarda um perfil nomeado de chave API (Gemini ou Groq)."""
+    """Guarda um perfil nomeado de chave API (Gemini, Groq ou OpenAI)."""
 
     def __init__(
         self,
@@ -28,14 +34,18 @@ class SaveApiKeyDialog(QDialog):
         self.setMinimumWidth(420)
 
         self.edit_label = QLineEdit()
-        self.edit_label.setPlaceholderText('Ex.: "Chave API Gemini — conta pessoal"')
+        self.edit_label.setPlaceholderText('Ex.: "Chave OpenAI — conta equipa"')
         if default_label:
             self.edit_label.setText(default_label)
 
         self.combo_provider = QComboBox()
-        self.combo_provider.addItems(["Gemini", "Groq"])
+        for label, pid in _API_OPTIONS:
+            self.combo_provider.addItem(label, pid)
         prov = default_provider.strip().lower()
-        self.combo_provider.setCurrentIndex(1 if prov == "groq" else 0)
+        for i in range(self.combo_provider.count()):
+            if self.combo_provider.itemData(i) == prov:
+                self.combo_provider.setCurrentIndex(i)
+                break
 
         self.edit_secret = QLineEdit()
         self.edit_secret.setEchoMode(QLineEdit.Password)
@@ -50,7 +60,7 @@ class SaveApiKeyDialog(QDialog):
 
         hint = QLabel(
             "As chaves são guardadas em ficheiro local (texto). Não partilhe a pasta "
-            "AppData e use perfis com nomes claros (ex.: Chave API Groq, Chave API Gemini)."
+            "AppData. Para vários fornecedores, crie perfis com nomes claros."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #888888; font-size: 11px;")
@@ -67,7 +77,10 @@ class SaveApiKeyDialog(QDialog):
         layout.addWidget(buttons)
 
     def provider_id(self) -> str:
-        return "groq" if self.combo_provider.currentIndex() == 1 else "gemini"
+        data = self.combo_provider.currentData()
+        if isinstance(data, str) and data.strip():
+            return data.strip().lower()
+        return "gemini"
 
     def profile_label(self) -> str:
         return self.edit_label.text().strip()

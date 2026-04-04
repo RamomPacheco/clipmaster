@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import QRect, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core import config  # noqa: F401  # garante import de config
+from app.core import config
 from app.core.api_key_store import ApiKeyStore
 from app.core.cuda_setup import inject_cuda_environment  # noqa: F401
 from app.core.logger import logger
@@ -47,12 +47,16 @@ from app.models.schemas import Clip, SocialCoverStyle, TiktokCaptionStyle
 from app.ui.components.drop_zone import DropZone
 from app.ui.dialogs.clip_dialog import ClipSelectionDialog
 from app.ui.dialogs.save_api_key_dialog import SaveApiKeyDialog
+from app.ui.dialogs.youtube_download_dialog import YoutubeDownloadDialog
 from app.services.video_engine import (
     export_preview_frame_png_bytes,
     get_export_dimensions,
     tiktok_subtitle_style_sizes,
 )
 from app.workers.processing_task import VideoProcessorThread
+
+# Provedores que usam chave API na nuvem (Gemini, Groq, OpenAI, endpoint compatível).
+_CLOUD_LLM_API_PROVIDERS = frozenset({"gemini", "groq", "openai"})
 
 
 class _ExportPreviewThread(QThread):
@@ -190,18 +194,69 @@ class ViralApp(QMainWindow):
         ids = sorted(set(ids), key=str.lower)
         return True, ids
 
+    def _fetch_openai_style_models(self, base_url: str) -> tuple[bool, List[str]]:
+        """Lista modelos via GET {base}/models (OpenAI ou servidor compatível)."""
+        default = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o1-mini", "gpt-3.5-turbo"]
+        key = ""
+        if hasattr(self, "edit_api_key"):
+            key = self.edit_api_key.text().strip()
+        if not key:
+            key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        base = (base_url or "").strip().rstrip("/")
+        if not base:
+            base = "https://api.openai.com/v1"
+        if not key:
+            return False, list(default)
+
+        try:
+            import httpx
+        except ImportError:
+            logger.warning("httpx não instalado; não é possível listar modelos OpenAI/compat.")
+            return False, list(default)
+
+        url = f"{base}/models"
+        try:
+            with httpx.Client(timeout=25.0) as client:
+                resp = client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Não foi possível listar modelos em %s: %s", url, e)
+            return False, list(default)
+
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, list):
+            return False, list(default)
+
+        ids: List[str] = []
+        for item in data:
+            if isinstance(item, dict):
+                mid = item.get("id")
+                if isinstance(mid, str) and mid.strip():
+                    ids.append(mid.strip())
+        if not ids:
+            return False, list(default)
+
+        ids = sorted(set(ids), key=str.lower)
+        return True, ids
+
     def _current_llm_provider(self) -> str:
         text = self.combo_provider.currentText().strip().lower()
         if "gemini" in text:
             return "gemini"
         if "groq" in text:
             return "groq"
+        if "openai" in text:
+            return "openai"
         if "transformers" in text or "hugging face" in text:
             return "transformers"
         return "ollama"
 
     def _uses_cloud_api_key(self) -> bool:
-        return self._current_llm_provider() in ("gemini", "groq")
+        return self._current_llm_provider() in _CLOUD_LLM_API_PROVIDERS
 
     def _sync_llm_model_options(self) -> None:
         provider = self._current_llm_provider()
@@ -226,6 +281,21 @@ class ViralApp(QMainWindow):
                 "Modelos devolvidos pela API Groq para a sua chave."
                 if live
                 else "Lista padrão — cole a chave Groq e mude de campo ou de provedor para atualizar."
+            )
+            self.combo_model.setEditable(not live)
+        elif provider == "openai":
+            self.lbl_model.setText("Modelo de IA (OpenAI):")
+            live, oa_models = self._fetch_openai_style_models("https://api.openai.com/v1")
+            self.combo_model.addItems(oa_models)
+            prefer = "gpt-4o-mini"
+            if prefer in oa_models:
+                self.combo_model.setCurrentText(prefer)
+            elif oa_models:
+                self.combo_model.setCurrentIndex(0)
+            self.combo_model.setToolTip(
+                "Modelos listados pela API OpenAI para a sua chave."
+                if live
+                else "Lista padrão — cole a chave OpenAI e altere o campo para atualizar."
             )
             self.combo_model.setEditable(not live)
         elif provider == "transformers":
@@ -280,6 +350,21 @@ class ViralApp(QMainWindow):
                 self.combo_social_model.setCurrentText(prev)
             elif "llama-3.3-70b-versatile" in models:
                 self.combo_social_model.setCurrentText("llama-3.3-70b-versatile")
+            elif models:
+                self.combo_social_model.setCurrentIndex(0)
+        elif provider == "openai":
+            live, models = self._fetch_openai_style_models("https://api.openai.com/v1")
+            self.combo_social_model.addItems(models)
+            self.combo_social_model.setToolTip(
+                "Modelos OpenAI para capa/descrição."
+                if live
+                else "Lista padrão OpenAI — use chave para listar todos."
+            )
+            self.combo_social_model.setEditable(not live)
+            if prev in models:
+                self.combo_social_model.setCurrentText(prev)
+            elif "gpt-4o-mini" in models:
+                self.combo_social_model.setCurrentText("gpt-4o-mini")
             elif models:
                 self.combo_social_model.setCurrentIndex(0)
         elif provider == "transformers":
@@ -765,13 +850,151 @@ class ViralApp(QMainWindow):
             self.lbl_api_key_row.setText("Chave API (Gemini)")
         elif prov == "groq":
             self.lbl_api_key_row.setText("Chave API (Groq)")
+        elif prov == "openai":
+            self.lbl_api_key_row.setText("Chave API (OpenAI)")
         else:
             self.lbl_api_key_row.setText("Chave API")
-        # Carregar perfil/chave antes de pedir listas à API (Gemini / Groq).
+        # Carregar perfil/chave antes de pedir listas à API (nuvem).
         self._refresh_api_profile_combo()
-        if self._current_llm_provider() not in ("gemini", "groq"):
+        if self._current_llm_provider() not in _CLOUD_LLM_API_PROVIDERS:
             self._sync_llm_model_options()
+        self._apply_llm_probe_buttons_state()
         self._refresh_status_bar()
+
+    def _apply_llm_probe_buttons_state(self) -> None:
+        if not hasattr(self, "btn_llm_probe_one"):
+            return
+        p = self._current_llm_provider()
+        self.btn_llm_probe_one.setEnabled(p != "transformers")
+        self.btn_llm_probe_list.setEnabled(p != "transformers")
+
+    def _on_probe_llm_model(self) -> None:
+        prov = self._current_llm_provider()
+        if prov == "transformers":
+            QMessageBox.information(
+                self,
+                "Teste não disponível",
+                "Para Transformers, valide o modelo com um processamento curto ou no terminal.",
+            )
+            return
+        if prov in _CLOUD_LLM_API_PROVIDERS and not self.edit_api_key.text().strip():
+            QMessageBox.warning(
+                self,
+                "Chave API",
+                "Cole a chave API ou escolha um perfil guardado.",
+            )
+            return
+        model = self.combo_model.currentText().strip()
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        try:
+            from app.services.llm_model_probe import probe_llm_model_minimal
+
+            ok, msg = probe_llm_model_minimal(
+                prov,
+                model,
+                self.edit_api_key.text().strip() or None,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+        if ok:
+            QMessageBox.information(
+                self,
+                "Modelo disponível",
+                f"{model}\n\n{msg}",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Teste falhou",
+                f"Modelo: {model}\n\n{msg}",
+            )
+
+    def _on_verify_llm_model_list(self) -> None:
+        prov = self._current_llm_provider()
+        if prov == "transformers":
+            QMessageBox.information(
+                self,
+                "Teste não disponível",
+                "A lista de modelos Hugging Face não é testada em lote aqui.",
+            )
+            return
+        if prov in _CLOUD_LLM_API_PROVIDERS and not self.edit_api_key.text().strip():
+            QMessageBox.warning(
+                self,
+                "Chave API",
+                "Cole a chave API ou escolha um perfil guardado.",
+            )
+            return
+
+        if prov == "gemini":
+            models = self._get_gemini_models()
+        elif prov == "groq":
+            _, models = self._fetch_groq_model_list()
+        elif prov == "openai":
+            _, models = self._fetch_openai_style_models("https://api.openai.com/v1")
+        else:
+            models = self._get_available_models()
+
+        if not models:
+            QMessageBox.warning(
+                self,
+                "Lista vazia",
+                "Não há modelos na lista. Confirme o provedor, a chave ou o Ollama.",
+            )
+            return
+
+        cap = 25
+        to_test = models[:cap]
+        q = QMessageBox.question(
+            self,
+            "Testar vários modelos",
+            f"A lista tem {len(models)} modelo(s). Serão testados os primeiros {len(to_test)} "
+            "com um pedido mínimo cada (em sequência). Pode consumir quota da API e demorar "
+            "alguns minutos.\n\nContinuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if q != QMessageBox.StandardButton.Yes:
+            return
+
+        QApplication.setOverrideCursor(QCursor(Qt.CursorShape.WaitCursor))
+        try:
+            from app.services.llm_model_probe import verify_models_from_list
+
+            rows = verify_models_from_list(
+                prov,
+                models,
+                self.edit_api_key.text().strip() or None,
+                max_models=cap,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._show_model_probe_results(rows, len(models))
+
+    def _show_model_probe_results(self, rows: list, total_listed: int) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Resultado dos testes de modelo")
+        dlg.setMinimumSize(520, 380)
+        layout = QVBoxLayout(dlg)
+        lbl = QLabel(
+            f"Testados {len(rows)} modelo(s) de {total_listed} na lista (máximo 25 por execução)."
+        )
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+        txt = QTextEdit()
+        txt.setReadOnly(True)
+        txt.setFont(QFont("Consolas", 9))
+        for mid, ok, msg in rows:
+            st = "OK     " if ok else "FALHOU "
+            txt.append(f"{st} {mid}\n    {msg}\n")
+        layout.addWidget(txt)
+        btn_fechar = QPushButton("Fechar")
+        btn_fechar.clicked.connect(dlg.accept)
+        row_fechar = QHBoxLayout()
+        row_fechar.addStretch()
+        row_fechar.addWidget(btn_fechar)
+        layout.addLayout(row_fechar)
+        dlg.exec()
 
     def _refresh_api_profile_combo(self) -> None:
         if not hasattr(self, "combo_api_profile"):
@@ -782,7 +1005,7 @@ class ViralApp(QMainWindow):
         prov = self._current_llm_provider()
         for p in self._api_key_store.list_for_provider(prov):
             self.combo_api_profile.addItem(p.label, p.id)
-        last = self._api_key_store.last_profile_id(prov) if prov in ("gemini", "groq") else None
+        last = self._api_key_store.last_profile_id(prov) if prov in _CLOUD_LLM_API_PROVIDERS else None
         sel = 0
         if last:
             for i in range(self.combo_api_profile.count()):
@@ -804,7 +1027,7 @@ class ViralApp(QMainWindow):
         pid = self.combo_api_profile.itemData(index)
         prov = self._current_llm_provider()
         if pid is None:
-            if prov in ("gemini", "groq"):
+            if prov in _CLOUD_LLM_API_PROVIDERS:
                 self._api_key_store.set_last_for_provider(prov, None)
             if self._uses_cloud_api_key():
                 self._sync_llm_model_options()
@@ -815,15 +1038,21 @@ class ViralApp(QMainWindow):
             self.edit_api_key.blockSignals(True)
             self.edit_api_key.setText(prof.secret)
             self.edit_api_key.blockSignals(False)
-            if prof.provider in ("gemini", "groq") and self._current_llm_provider() == prof.provider:
+            if (
+                prof.provider in _CLOUD_LLM_API_PROVIDERS
+                and self._current_llm_provider() == prof.provider
+            ):
                 self._sync_llm_model_options()
 
     def _open_save_api_key_dialog(self) -> None:
         prov = self._current_llm_provider()
-        default_lbl = "Chave API Groq" if prov == "groq" else "Chave API Gemini"
+        default_lbl = {
+            "groq": "Chave API Groq",
+            "openai": "Chave API OpenAI",
+        }.get(prov, "Chave API Gemini")
         dlg = SaveApiKeyDialog(
             self,
-            default_provider=prov if prov in ("gemini", "groq") else "gemini",
+            default_provider=prov if prov in _CLOUD_LLM_API_PROVIDERS else "gemini",
             default_label=default_lbl,
             default_secret=self.edit_api_key.text().strip(),
         )
@@ -915,6 +1144,8 @@ class ViralApp(QMainWindow):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=True,
             )
             out = result.stdout.strip()
@@ -970,6 +1201,7 @@ class ViralApp(QMainWindow):
         ia_line = {
             "gemini": "IA: Gemini (API)",
             "groq": "IA: Groq (API)",
+            "openai": "IA: OpenAI (API)",
             "transformers": "IA: Transformers (local)",
         }.get(prov, "IA: Ollama (local)")
 
@@ -995,7 +1227,7 @@ class ViralApp(QMainWindow):
 
         header = QFrame()
         header.setObjectName("appHeader")
-        header.setFixedHeight(60)
+        header.setFixedHeight(120)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(20, 0, 20, 0)
         header_layout.setSpacing(0)
@@ -1056,11 +1288,36 @@ class ViralApp(QMainWindow):
         basic_layout = QVBoxLayout(tab_basic)
         basic_layout.setSpacing(14)
 
+        gb_video = QGroupBox("Vídeo para processar")
+        gb_video.setStyleSheet(
+            "QGroupBox { font-weight: bold; padding-top: 10px; margin-top: 4px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: #e0e0e0; }"
+        )
+        video_block = QVBoxLayout(gb_video)
+        video_block.setSpacing(10)
+
         self.drop_zone = DropZone()
-        self.drop_zone.setMinimumHeight(140)
+        self.drop_zone.setMinimumHeight(130)
         self.drop_zone.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
         self.drop_zone.file_dropped.connect(self.on_video_selected)
-        basic_layout.addWidget(self.drop_zone)
+        video_block.addWidget(self.drop_zone)
+
+        lbl_or = QLabel("ou")
+        lbl_or.setAlignment(Qt.AlignCenter)
+        lbl_or.setStyleSheet("color: #888888; font-size: 12px;")
+        video_block.addWidget(lbl_or)
+
+        self.btn_youtube_load = QPushButton("Descarregar do YouTube e usar neste corte")
+        self.btn_youtube_load.setObjectName("secondaryButton")
+        self.btn_youtube_load.setMinimumHeight(40)
+        self.btn_youtube_load.setToolTip(
+            "Abre o descarregador (yt-dlp). Quando terminar, o ficheiro fica selecionado "
+            "como vídeo de entrada — o mesmo que arrastar um MP4 para a caixa acima."
+        )
+        self.btn_youtube_load.clicked.connect(self._open_youtube_download)
+        video_block.addWidget(self.btn_youtube_load)
+
+        basic_layout.addWidget(gb_video)
 
         out_row = QHBoxLayout()
         lbl_output = QLabel("Pasta de saída")
@@ -1137,7 +1394,13 @@ class ViralApp(QMainWindow):
         lbl_provider.setStyleSheet("color: #aaaaaa;")
         self.combo_provider = QComboBox()
         self.combo_provider.addItems(
-            ["Local (Ollama)", "API (Gemini)", "API (Groq)", "Local (Transformers)"]
+            [
+                "Local (Ollama)",
+                "API (Gemini)",
+                "API (Groq)",
+                "API (OpenAI)",
+                "Local (Transformers)",
+            ]
         )
         self.combo_provider.setCurrentText("Local (Ollama)")
         self.combo_provider.setMinimumHeight(32)
@@ -1146,12 +1409,33 @@ class ViralApp(QMainWindow):
         self.lbl_model.setStyleSheet("color: #aaaaaa;")
         self.combo_model = QComboBox()
         self.combo_model.setMinimumHeight(32)
+        model_row = QHBoxLayout()
+        model_row.setSpacing(8)
+        model_row.addWidget(self.combo_model, stretch=1)
+        self.btn_llm_probe_one = QPushButton("Testar modelo")
+        self.btn_llm_probe_one.setObjectName("secondaryButton")
+        self.btn_llm_probe_one.setToolTip(
+            "Envia um pedido mínimo (poucos tokens) com o modelo e a chave atuais para ver se a API responde."
+        )
+        self.btn_llm_probe_one.clicked.connect(self._on_probe_llm_model)
+        self.btn_llm_probe_list = QPushButton("Testar lista da API…")
+        self.btn_llm_probe_list.setObjectName("secondaryButton")
+        self.btn_llm_probe_list.setToolTip(
+            "Lista modelos devolvidos pela API e testa os primeiros 25 com um pedido mínimo cada "
+            "(pode consumir quota e demorar)."
+        )
+        self.btn_llm_probe_list.clicked.connect(self._on_verify_llm_model_list)
+        model_row.addWidget(self.btn_llm_probe_one)
+        model_row.addWidget(self.btn_llm_probe_list)
+        model_row_wrap = QWidget()
+        model_row_wrap.setLayout(model_row)
+
         self.lbl_api_profile = QLabel("Perfil de chave guardada")
         self.lbl_api_profile.setStyleSheet("color: #aaaaaa;")
         self.combo_api_profile = QComboBox()
         self.combo_api_profile.setMinimumHeight(32)
         self.combo_api_profile.setToolTip(
-            "Mostra só os perfis guardados para o provedor selecionado (Gemini ou Groq). "
+            "Perfis guardados para o provedor atual (Gemini, Groq ou OpenAI). "
             "No Windows o ficheiro fica em AppData\\Local\\AI_Viral_Clipper\\api_keys.json."
         )
         self.btn_api_key_save = QPushButton("Guardar…")
@@ -1180,7 +1464,7 @@ class ViralApp(QMainWindow):
         ai_form.addWidget(lbl_provider, 0, 0, Qt.AlignRight)
         ai_form.addWidget(self.combo_provider, 0, 1)
         ai_form.addWidget(self.lbl_model, 1, 0, Qt.AlignRight)
-        ai_form.addWidget(self.combo_model, 1, 1)
+        ai_form.addWidget(model_row_wrap, 1, 1)
         ai_form.addWidget(self.lbl_api_profile, 2, 0, Qt.AlignRight | Qt.AlignTop)
         ai_form.addWidget(profile_wrap, 2, 1)
         ai_form.addWidget(self.lbl_api_key_row, 3, 0, Qt.AlignRight | Qt.AlignTop)
@@ -1234,6 +1518,35 @@ class ViralApp(QMainWindow):
         gb_analysis.setLayout(an_form)
         adv_layout.addWidget(gb_analysis)
 
+        gb_clip_duration = QGroupBox("Duração dos clipes")
+        gb_clip_duration.setToolTip(
+            "Limites aplicados depois da análise da IA: clipes curtos demais são alargados "
+            "e longos demais são divididos (quando o conteúdo e a transcrição permitem)."
+        )
+        clip_dur_form = QGridLayout()
+        lbl_clip_min = QLabel("Duração mínima")
+        lbl_clip_min.setStyleSheet("color: #aaaaaa;")
+        self.spin_clip_min_seconds = QSpinBox()
+        self.spin_clip_min_seconds.setRange(5, 590)
+        self.spin_clip_min_seconds.setValue(int(config.MIN_CLIP_SECONDS))
+        self.spin_clip_min_seconds.setSuffix(" s")
+        self.spin_clip_min_seconds.setMinimumHeight(32)
+        self.spin_clip_min_seconds.valueChanged.connect(self._ensure_clip_duration_order)
+        lbl_clip_max = QLabel("Duração máxima")
+        lbl_clip_max.setStyleSheet("color: #aaaaaa;")
+        self.spin_clip_max_seconds = QSpinBox()
+        self.spin_clip_max_seconds.setRange(10, 600)
+        self.spin_clip_max_seconds.setValue(int(config.MAX_CLIP_SECONDS))
+        self.spin_clip_max_seconds.setSuffix(" s")
+        self.spin_clip_max_seconds.setMinimumHeight(32)
+        self.spin_clip_max_seconds.valueChanged.connect(self._ensure_clip_duration_order)
+        clip_dur_form.addWidget(lbl_clip_min, 0, 0, Qt.AlignRight)
+        clip_dur_form.addWidget(self.spin_clip_min_seconds, 0, 1)
+        clip_dur_form.addWidget(lbl_clip_max, 1, 0, Qt.AlignRight)
+        clip_dur_form.addWidget(self.spin_clip_max_seconds, 1, 1)
+        gb_clip_duration.setLayout(clip_dur_form)
+        adv_layout.addWidget(gb_clip_duration)
+
         gb_export = QGroupBox("Exportação e extras")
         ex_form = QVBoxLayout()
         lbl_framing = QLabel("Enquadramento")
@@ -1264,6 +1577,16 @@ class ViralApp(QMainWindow):
         self.chk_dark_theme = QCheckBox("Tema escuro")
         self.chk_dark_theme.setChecked(True)
         self.chk_dark_theme.stateChanged.connect(self.toggle_theme)
+        self.chk_moviepy_engagement = QCheckBox(
+            "Efeitos de retenção (MoviePy): push-in e fade só no vídeo"
+        )
+        self.chk_moviepy_engagement.setChecked(True)
+        self.chk_moviepy_engagement.setToolTip(
+            "Segundo passe com MoviePy: zoom lento centrado (Ken Burns discreto) e fades curtos "
+            "apenas no vídeo; o áudio é copiado sem alteração. A IA pode pedir \"none\" por clipe "
+            "ou combinar push_in_subtle / fade_video_edges. Encode: NVENC se disponível, senão libx264. "
+            "Exige: pip install moviepy."
+        )
         ex_form.addWidget(lbl_framing)
         ex_form.addWidget(self.combo_framing_mode)
         ex_form.addWidget(lbl_bitrate)
@@ -1272,6 +1595,7 @@ class ViralApp(QMainWindow):
         ex_form.addWidget(self.edit_custom_prompt)
         ex_form.addWidget(lbl_max_tokens)
         ex_form.addWidget(self.edit_max_new_tokens)
+        ex_form.addWidget(self.chk_moviepy_engagement)
         ex_form.addWidget(self.chk_dark_theme)
         gb_export.setLayout(ex_form)
         adv_layout.addWidget(gb_export)
@@ -1778,6 +2102,26 @@ class ViralApp(QMainWindow):
         self.btn_tab_adv.setChecked(index == 1)
         self.btn_tab_social.setChecked(index == 2)
 
+    def _ensure_clip_duration_order(self) -> None:
+        """Garante mínimo < máximo ao alterar os spin boxes."""
+        if not hasattr(self, "spin_clip_min_seconds"):
+            return
+        mn = self.spin_clip_min_seconds.value()
+        mx = self.spin_clip_max_seconds.value()
+        if mn < mx:
+            return
+        self.spin_clip_min_seconds.blockSignals(True)
+        self.spin_clip_max_seconds.blockSignals(True)
+        try:
+            sender = self.sender()
+            if sender == self.spin_clip_min_seconds:
+                self.spin_clip_max_seconds.setValue(min(600, mn + 5))
+            else:
+                self.spin_clip_min_seconds.setValue(max(5, mx - 5))
+        finally:
+            self.spin_clip_min_seconds.blockSignals(False)
+            self.spin_clip_max_seconds.blockSignals(False)
+
     # ---------------- Tema ----------------
     def _apply_dark_theme(self) -> None:
         self.setStyleSheet(
@@ -1925,6 +2269,22 @@ class ViralApp(QMainWindow):
             self._apply_light_theme()
 
     # ---------------- Handlers ----------------
+    def _open_youtube_download(self) -> None:
+        try:
+            import yt_dlp  # noqa: F401
+        except ImportError:
+            QMessageBox.critical(
+                self,
+                "yt-dlp em falta",
+                "Instale a dependência no ambiente do projeto:\npip install yt-dlp",
+            )
+            return
+        base = self.output_folder_path or str(config.EXPORTS_ROOT)
+        Path(base).mkdir(parents=True, exist_ok=True)
+        dlg = YoutubeDownloadDialog(default_download_dir=base, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted and dlg.downloaded_path:
+            self.on_video_selected(str(dlg.downloaded_path))
+
     def on_video_selected(self, file_path: str) -> None:
         self.current_video_path = file_path
         self.log_output.clear()
@@ -2001,9 +2361,9 @@ class ViralApp(QMainWindow):
             self.update_log(
                 "[*] Pacote social: DESATIVADO — só análise, transcrição e render dos clipes."
             )
-        if provider_selected in ("gemini", "groq") and not self.edit_api_key.text().strip():
+        if provider_selected in _CLOUD_LLM_API_PROVIDERS and not self.edit_api_key.text().strip():
             self.update_log(
-                "[!] ERRO: Informe a chave API (Gemini ou Groq) ou escolha um perfil guardado."
+                "[!] ERRO: Informe a chave API ou escolha um perfil guardado (Gemini, Groq ou OpenAI)."
             )
             self._unlock_ui_after_process()
             self.btn_action.setText("Informar API Key")
@@ -2020,7 +2380,22 @@ class ViralApp(QMainWindow):
             f"[*] Legendas TikTok: {'ATIVADAS' if self.chk_tiktok_captions.isChecked() else 'DESATIVADAS'}"
         )
         self.update_log(
+            f"[*] Efeitos MoviePy (retenção): {'ATIVADOS' if self.chk_moviepy_engagement.isChecked() else 'DESATIVADOS'}"
+        )
+        self.update_log(
             f"[*] Pré-visualização: {'DESATIVADA (render direto)' if self.chk_skip_preview.isChecked() else 'ATIVADA'}"
+        )
+        clip_min = int(self.spin_clip_min_seconds.value())
+        clip_max = int(self.spin_clip_max_seconds.value())
+        if clip_min >= clip_max:
+            self.update_log(
+                "[!] ERRO: A duração mínima do clipe deve ser menor que a duração máxima."
+            )
+            self._unlock_ui_after_process()
+            self.btn_action.setText("Ajustar duração dos clipes")
+            return
+        self.update_log(
+            f"[*] Duração dos clipes (mín. / máx.): {clip_min}s — {clip_max}s"
         )
 
         self.btn_action.setEnabled(False)
@@ -2058,6 +2433,7 @@ class ViralApp(QMainWindow):
             aspect_ratio=self.combo_aspect_ratio.currentText(),
             framing_mode=self.combo_framing_mode.currentText(),
             enable_tiktok_captions=self.chk_tiktok_captions.isChecked(),
+            enable_moviepy_engagement=self.chk_moviepy_engagement.isChecked(),
             bitrate=self.edit_bitrate.text().strip(),
             llm_max_new_tokens=(
                 int(self.edit_max_new_tokens.text().strip())
@@ -2075,6 +2451,8 @@ class ViralApp(QMainWindow):
             enable_social_package=enable_social,
             social_cover_style=self._social_cover_style_for_worker(),
             tiktok_caption_style=self._tiktok_caption_style_for_worker(),
+            min_clip_seconds=float(self.spin_clip_min_seconds.value()),
+            max_clip_seconds=float(self.spin_clip_max_seconds.value()),
         )
         self.worker.progress_signal.connect(self.update_log)
         self.worker.log_signal.connect(self.append_engine_log)
