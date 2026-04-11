@@ -81,6 +81,20 @@ def probe_llm_model_minimal(
             )
             return True, "OpenAI respondeu ao pedido mínimo."
 
+        if p == "openrouter":
+            from app.services.llm_analyzer import _openrouter_chat_completion
+
+            _openrouter_chat_completion(
+                "Reply with a single letter only.",
+                "Say A.",
+                mid,
+                (api_key or "").strip(),
+                temperature=0,
+                max_tokens=4,
+                json_object=False,
+            )
+            return True, "OpenRouter respondeu ao pedido mínimo."
+
         if p == "transformers":
             return (
                 False,

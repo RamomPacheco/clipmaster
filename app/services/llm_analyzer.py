@@ -14,6 +14,13 @@ from app.services.engagement_effects_catalog import (
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
+OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Cabeçalhos opcionais recomendados pela OpenRouter (rankings / identificação da app).
+OPENROUTER_EXTRA_HEADERS: Dict[str, str] = {
+    "HTTP-Referer": "http://localhost",
+    "X-Title": "ClipMaster",
+}
 
 # Reforça alinhamento aos timestamps reais do Whisper (reduz alucinação de segundos).
 _TIMESTAMP_RULE = """
@@ -184,10 +191,54 @@ def build_prompts(prompt_type: str, text: str, custom_prompt: str | None) -> Tup
 
 
 def _extract_json_array(raw_content: str) -> List[Dict[str, Any]]:
+    """
+    Extrai uma lista de objetos JSON (clipes) da resposta do modelo.
+    Suporta array cru, objeto com chave \"clips\"/\"clipes\"/etc., e reduz falhas por
+    regex greedy ou JSON truncado.
+    """
+    text = (raw_content or "").strip()
+    if not text:
+        return []
+
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```\s*$", "", text).strip()
+
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            for key in ("clips", "clipes", "data", "items", "results", "suggestions"):
+                v = data.get(key)
+                if isinstance(v, list):
+                    return [x for x in v if isinstance(x, dict)]
+                if isinstance(v, dict) and "start" in v and "end" in v:
+                    return [v]
+            if "start" in data and "end" in data:
+                return [data]
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("[")
+    if start >= 0:
+        try:
+            dec = json.JSONDecoder()
+            arr, _end = dec.raw_decode(text[start:])
+            if isinstance(arr, list):
+                return [x for x in arr if isinstance(x, dict)]
+        except json.JSONDecodeError:
+            pass
+
     match = re.search(r"\[.*\]", raw_content, re.DOTALL)
     if not match:
         return []
-    return json.loads(match.group(0).strip())
+    try:
+        arr = json.loads(match.group(0).strip())
+        if isinstance(arr, list):
+            return [x for x in arr if isinstance(x, dict)]
+    except json.JSONDecodeError:
+        return []
+    return []
 
 
 def _extract_json_object(raw_content: str) -> Dict[str, Any]:
@@ -209,6 +260,7 @@ def _openai_compatible_chat_completion(
     json_object: bool = False,
     env_key_fallback: str | None = None,
     api_label: str = "API",
+    extra_headers: Dict[str, str] | None = None,
 ) -> str:
     """POST /v1/chat/completions (OpenAI, Groq, Mistral, Together, base local, etc.)."""
     try:
@@ -230,6 +282,8 @@ def _openai_compatible_chat_completion(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    if extra_headers:
+        headers.update(extra_headers)
     body: Dict[str, Any] = {
         "model": model_to_use,
         "messages": [
@@ -313,6 +367,31 @@ def _openai_chat_completion(
     )
 
 
+def _openrouter_chat_completion(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    json_object: bool = False,
+) -> str:
+    return _openai_compatible_chat_completion(
+        OPENROUTER_CHAT_COMPLETIONS_URL,
+        system_prompt,
+        user_prompt,
+        model_to_use,
+        api_key,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        json_object=json_object,
+        env_key_fallback="OPENROUTER_API_KEY",
+        api_label="OpenRouter",
+        extra_headers=OPENROUTER_EXTRA_HEADERS,
+    )
+
+
 def _analyze_with_groq(
     system_prompt: str,
     user_prompt: str,
@@ -349,6 +428,40 @@ def _analyze_with_openai(
     return _extract_json_array(raw)
 
 
+def _analyze_with_openrouter(
+    system_prompt: str,
+    user_prompt: str,
+    model_to_use: str,
+    api_key: str | None = None,
+) -> List[Dict[str, Any]]:
+    raw = _openrouter_chat_completion(
+        system_prompt,
+        user_prompt,
+        model_to_use,
+        (api_key or "").strip(),
+        temperature=0.1,
+        max_tokens=8192,
+        json_object=False,
+    )
+    return _extract_json_array(raw)
+
+
+def _ollama_clip_options() -> Dict[str, Any]:
+    """Contexto e teto de tokens para análise de clipes (JSON longo)."""
+    num_ctx = int(os.environ.get("CLIPMASTER_OLLAMA_NUM_CTX", str(LLMParams.NUM_CTX)))
+    # 1024 tokens corta com frequência o JSON com vários clipes — 4096+ é mais seguro
+    default_predict = max(LLMParams.NUM_PREDICT, 4096)
+    num_predict = int(
+        os.environ.get("CLIPMASTER_OLLAMA_NUM_PREDICT", str(default_predict))
+    )
+    return {
+        "num_ctx": max(512, num_ctx),
+        "num_predict": max(512, num_predict),
+        "temperature": LLMParams.TEMPERATURE,
+        "top_p": LLMParams.TOP_P,
+    }
+
+
 def _analyze_with_ollama(
     system_prompt: str,
     user_prompt: str,
@@ -361,16 +474,17 @@ def _analyze_with_ollama(
             {"role": "user", "content": user_prompt},
         ],
         format="json",
-        options={
-            # TODO: Verificar se o num_ctx é necessário
-            "num_ctx": LLMParams.NUM_CTX,
-            "num_predict": LLMParams.NUM_PREDICT,
-            "temperature": LLMParams.TEMPERATURE,
-            "top_p": LLMParams.TOP_P,
-        },
+        options=_ollama_clip_options(),
     )
     raw_content = response["message"]["content"]
-    return _extract_json_array(raw_content)
+    parsed = _extract_json_array(raw_content)
+    if not parsed and (raw_content or "").strip():
+        logger.warning(
+            "Ollama devolveu texto mas não foi possível extrair array de clipes. "
+            "Trecho da resposta: %r",
+            (raw_content or "")[:500],
+        )
+    return parsed
 
 
 def _analyze_with_gemini(
@@ -464,6 +578,8 @@ def analyze_viral_potential(
             return _analyze_with_groq(system_prompt, user_prompt, model_to_use, api_key)
         if provider == "openai":
             return _analyze_with_openai(system_prompt, user_prompt, model_to_use, api_key)
+        if provider == "openrouter":
+            return _analyze_with_openrouter(system_prompt, user_prompt, model_to_use, api_key)
         if provider == "transformers":
             return _analyze_with_transformers(
                 system_prompt,
@@ -619,6 +735,28 @@ def generate_social_package(
                 )
             except Exception:  # noqa: BLE001
                 raw_content = _openai_chat_completion(
+                    system_prompt,
+                    user_prompt,
+                    model_to_use,
+                    (api_key or "").strip(),
+                    temperature=0.2,
+                    max_tokens=4096,
+                    json_object=False,
+                )
+            obj = _extract_json_object(raw_content)
+        elif provider == "openrouter":
+            try:
+                raw_content = _openrouter_chat_completion(
+                    system_prompt,
+                    user_prompt,
+                    model_to_use,
+                    (api_key or "").strip(),
+                    temperature=0.2,
+                    max_tokens=4096,
+                    json_object=True,
+                )
+            except Exception:  # noqa: BLE001
+                raw_content = _openrouter_chat_completion(
                     system_prompt,
                     user_prompt,
                     model_to_use,

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import subprocess
-import shutil
 import textwrap
 from pathlib import Path
 from collections import defaultdict
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from app.core.ffmpeg_bin import get_ffmpeg_path
 from app.core.logger import logger
 from app.models.schemas import Clip, SocialCoverStyle, TiktokCaptionStyle
+
+
+def _ffmpeg_bin() -> str:
+    return get_ffmpeg_path() or "ffmpeg"
 
 PROFILE_MAP = {
     "SD (720p)": {"preset": "veryfast", "crf": "24", "height": 720},
@@ -37,11 +41,11 @@ def _ffmpeg_has_encoder(encoder: str) -> bool:
     Detecta se o FFmpeg tem um encoder disponível (ex.: h264_nvenc).
     Mantém fallback seguro para libx264 se não houver.
     """
-    if not shutil.which("ffmpeg"):
+    if not get_ffmpeg_path():
         return False
     try:
         proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [_ffmpeg_bin(), "-hide_banner", "-encoders"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -145,7 +149,7 @@ def _ass_escape_basic(text: str) -> str:
 
 def _ffmpeg_extract_frame_png_bytes(video_path: Path, t_sec: float) -> Optional[bytes]:
     cmd = [
-        "ffmpeg",
+        _ffmpeg_bin(),
         "-hide_banner",
         "-loglevel",
         "error",
@@ -568,7 +572,7 @@ def export_preview_frame_png_bytes(
     )
     full_vf = f"setpts=PTS-STARTPTS,{vf}"
     cmd = [
-        "ffmpeg",
+        _ffmpeg_bin(),
         "-hide_banner",
         "-loglevel",
         "error",
@@ -691,7 +695,7 @@ def create_social_cover(
     try:
         _run(
             [
-                "ffmpeg",
+                _ffmpeg_bin(),
                 "-y",
                 "-hide_banner",
                 "-loglevel",
@@ -717,7 +721,7 @@ def create_social_cover(
         try:
             _run(
                 [
-                    "ffmpeg",
+                    _ffmpeg_bin(),
                     "-y",
                     "-hide_banner",
                     "-loglevel",
@@ -742,7 +746,7 @@ def create_social_cover(
             )
             _run(
                 [
-                    "ffmpeg",
+                    _ffmpeg_bin(),
                     "-y",
                     "-hide_banner",
                     "-loglevel",
@@ -773,7 +777,7 @@ def extract_safe_audio(video_path: Path, output_dir: Path) -> Path:
     temp_audio_path = output_dir / "temp_audio_safe.wav"
 
     cmd = [
-        "ffmpeg",
+        _ffmpeg_bin(),
         "-y",
         "-i",
         str(video_path),
@@ -956,7 +960,7 @@ def render_clips(
         base_output_file = clip_dir / CLIP_BASE_FILENAME if needs_base_file else output_file
 
         cmd = [
-            "ffmpeg",
+            _ffmpeg_bin(),
             "-y",
             "-i",
             str(video_path),
@@ -1071,7 +1075,7 @@ def render_clips(
         if ass_path:
             ass_for_ffmpeg = ass_path.name.replace("'", r"\'")
             subtitle_cmd = [
-                "ffmpeg",
+                _ffmpeg_bin(),
                 "-y",
                 "-i",
                 str(post_path),

@@ -8,14 +8,14 @@ from typing import Any, Dict, List, Optional
 
 from app.core.logger import logger
 
-_API_KEY_PROVIDERS = frozenset({"gemini", "groq", "openai"})
+_API_KEY_PROVIDERS = frozenset({"gemini", "groq", "openai", "openrouter"})
 
 
 @dataclass
 class ApiKeyProfile:
     id: str
     label: str
-    provider: str  # gemini | groq | openai
+    provider: str  # gemini | groq | openai | openrouter
     secret: str
 
     def to_json(self) -> Dict[str, str]:
@@ -112,7 +112,7 @@ class ApiKeyStore:
             secret=secret.strip(),
         )
         if prof.provider not in _API_KEY_PROVIDERS:
-            raise ValueError("provider deve ser gemini, groq ou openai")
+            raise ValueError("provider deve ser gemini, groq, openai ou openrouter")
         if not prof.secret:
             raise ValueError("chave vazia")
         self._profiles.append(prof)

@@ -10,6 +10,7 @@ from typing import List, Optional
 from PySide6.QtCore import QThread, Signal
 from app.core import config
 from app.core.config import LLMParams
+from app.core.ffmpeg_bin import ffmpeg_available, get_ffprobe_path
 from app.core.logger import ForwardingHandler, logger
 from app.models.schemas import (
     Clip,
@@ -23,6 +24,7 @@ from app.services.clip_manager import (
     build_overlapping_chapters,
     enforce_duration_limits,
     filter_valid_clips,
+    rank_clips_by_density,
     remove_duplicate_clips,
     snap_clips_to_transcript,
 )
@@ -39,11 +41,15 @@ from app.services.video_engine import (
 )
 
 
+def _ffprobe_bin() -> str:
+    return get_ffprobe_path() or "ffprobe"
+
+
 def _ffprobe_format_tags(video_path: Path) -> dict[str, str]:
     try:
         proc = subprocess.run(
             [
-                "ffprobe",
+                _ffprobe_bin(),
                 "-v",
                 "error",
                 "-print_format",
@@ -214,9 +220,10 @@ class VideoProcessorThread(QThread):
     # Infra
     # ----------------------
     def check_dependencies(self) -> bool:
-        if not shutil.which("ffmpeg"):
+        if not ffmpeg_available():
             self.error_signal.emit(
-                "ERRO CRÍTICO: FFmpeg não detectado nas Variáveis de Ambiente (PATH)!"
+                "ERRO CRÍTICO: FFmpeg não encontrado. Coloque ffmpeg em bundled/ffmpeg/<sistema>/, "
+                "defina CLIPMASTER_FFMPEG_PATH ou instale no PATH."
             )
             return False
         return True
@@ -302,6 +309,9 @@ class VideoProcessorThread(QThread):
                     f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
                 )
                 self.progress_update.emit(0, 0)
+                self.progress_signal.emit(
+                    "A iniciar transcrição (1.ª vez pode descarregar o modelo — aguarde)..."
+                )
                 segments, max_video_duration = transcribe_audio(
                     temp_audio_path,
                     model_name=self.whisper_model,
@@ -316,6 +326,9 @@ class VideoProcessorThread(QThread):
                     f"Transcrição com Whisper em {whisper_device.upper()} ({whisper_compute})."
                 )
                 self.progress_update.emit(0, 0)
+                self.progress_signal.emit(
+                    "A iniciar transcrição (1.ª vez pode descarregar o modelo — aguarde)..."
+                )
                 segments, max_video_duration = transcribe_audio(
                     temp_audio_path,
                     model_name=self.whisper_model,
@@ -343,6 +356,9 @@ class VideoProcessorThread(QThread):
                     f"Transcrição com Whisper em AUTO: {whisper_device.upper()} ({whisper_compute})."
                 )
                 self.progress_update.emit(0, 0)
+                self.progress_signal.emit(
+                    "A iniciar transcrição (1.ª vez pode descarregar o modelo — aguarde)..."
+                )
                 segments, max_video_duration = transcribe_audio(
                     temp_audio_path,
                     model_name=self.whisper_model,
@@ -448,6 +464,7 @@ class VideoProcessorThread(QThread):
                 max_seconds=self.max_clip_seconds,
             )
             all_clips = remove_duplicate_clips(all_clips)
+            all_clips = rank_clips_by_density(all_clips, segments, min_words_per_sec=0.8)
 
             self.metrics.total_clips_found = len(all_clips)
             self.metrics.video_duration = max_video_duration

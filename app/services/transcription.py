@@ -4,6 +4,7 @@ import multiprocessing
 from multiprocessing.context import BaseContext
 import json
 import os
+import sys
 from pathlib import Path
 from queue import Empty
 import tempfile
@@ -35,10 +36,30 @@ def worker_transcricao(payload: Dict[str, Any], result_queue: multiprocessing.Qu
     Corre apenas no processo filho. Instancia WhisperModel aqui e devolve o resultado pela fila.
     Evita crash do processo principal (ex.: 0xC0000409) na limpeza da VRAM do CTranslate2.
     """
-    import gc as gc_local
     from pathlib import Path as PathLocal
 
-    from faster_whisper import WhisperModel
+    def _send_progress(msg: str) -> None:
+        try:
+            result_queue.put({"type": "progress", "message": str(msg)})
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _send_fatal(err: str) -> None:
+        try:
+            result_queue.put({"ok": False, "error": err})
+        except Exception:  # noqa: BLE001
+            pass
+
+    _send_progress("Worker Whisper: a carregar bibliotecas (faster-whisper)...")
+
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as e:  # noqa: BLE001
+        _send_fatal(
+            f"Falha ao importar faster_whisper no processo filho (comum no .exe sem DLLs): {e!r}"
+        )
+        logger.exception("Import faster_whisper no worker.")
+        os._exit(1)  # noqa: SCS108
 
     audio_path = PathLocal(payload["audio_path"])
     model_size = str(payload["model_size"])
@@ -47,15 +68,6 @@ def worker_transcricao(payload: Dict[str, Any], result_queue: multiprocessing.Qu
     beam_size = int(payload["beam_size"])
     language = payload.get("language")
     out_jsonl_path = PathLocal(payload["out_jsonl_path"])
-
-    def _send_progress(msg: str) -> None:
-        """
-        Logs no processo filho nem sempre aparecem na UI. Enviamos via Queue para o pai.
-        """
-        try:
-            result_queue.put({"type": "progress", "message": str(msg)})
-        except Exception:  # noqa: BLE001
-            pass
 
     def run_pass_and_write_jsonl_and_exit(dev: str, ctype: str) -> None:
         """
@@ -194,55 +206,75 @@ def transcribe_audio(
     )
     proc.start()
     result: Dict[str, Any] | None = None
-    try:
-        try:
-            # Consome progresso do worker (se houver), mas não depende de "ok" via Queue.
-            # A finalização bem-sucedida é detectada pelo término do processo + presença do JSONL.
-            t_deadline = time.time() + float(_TRANSCRIBE_QUEUE_TIMEOUT_SEC)
-            while proc.is_alive() and time.time() < t_deadline:
-                try:
-                    msg = result_queue.get(timeout=1.0)
-                except Empty:
-                    continue
-                if isinstance(msg, dict) and msg.get("type") == "progress":
-                    m = msg.get("message")
-                    if isinstance(m, str) and m.strip():
-                        logger.info("%s", m.strip())
-                    continue
-                # Mensagens de erro (opcional)
-                result = msg if isinstance(msg, dict) else None
-                if isinstance(result, dict) and result.get("ok") is False:
-                    break
 
-            # Se ainda estiver vivo após o deadline, força término (teardown CUDA pode travar).
-            if proc.is_alive():
-                logger.warning(
-                    "Worker Whisper ainda ativo após timeout de transcrição. A forçar término para prosseguir."
-                )
-                proc.kill()
-            proc.join(timeout=_JOIN_GRACE_SEC)
-        except Empty:
-            logger.error("Timeout à espera da transcrição Whisper (fila vazia).")
-            proc.terminate()
-            raise RuntimeError(
-                "Transcrição excedeu o tempo máximo ou o processo filho não respondeu."
-            ) from None
+    def _drain_queue() -> None:
+        nonlocal result
+        while True:
+            try:
+                msg = result_queue.get_nowait()
+            except Empty:
+                break
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "progress":
+                m = msg.get("message")
+                if isinstance(m, str) and m.strip():
+                    logger.info("%s", m.strip())
+                continue
+            result = msg
+            if msg.get("ok") is False:
+                break
+
+    try:
+        # Consome progresso do worker; quando o processo morre cedo, a fila ainda tem mensagens.
+        t_deadline = time.time() + float(_TRANSCRIBE_QUEUE_TIMEOUT_SEC)
+        while proc.is_alive() and time.time() < t_deadline:
+            try:
+                msg = result_queue.get(timeout=1.0)
+            except Empty:
+                continue
+            if isinstance(msg, dict) and msg.get("type") == "progress":
+                m = msg.get("message")
+                if isinstance(m, str) and m.strip():
+                    logger.info("%s", m.strip())
+                continue
+            result = msg if isinstance(msg, dict) else None
+            if isinstance(result, dict) and result.get("ok") is False:
+                break
+
+        if proc.is_alive() and time.time() >= t_deadline:
+            logger.warning(
+                "Worker Whisper ainda ativo após timeout de transcrição. A forçar término para prosseguir."
+            )
+            proc.kill()
+        proc.join(timeout=_JOIN_GRACE_SEC)
+        _drain_queue()
     finally:
         proc.join(timeout=_JOIN_GRACE_SEC)
         if proc.is_alive():
             logger.warning("Processo Whisper ainda ativo após join — forçando término.")
             proc.kill()
             proc.join(timeout=30)
+        _drain_queue()
 
     segments: List[Dict[str, Any]] = []
-    # Se o worker mandou erro explícito, respeita.
     if isinstance(result, dict) and result.get("ok") is False:
         err = result.get("error", "erro desconhecido")
         raise RuntimeError(f"Transcrição falhou no processo isolado: {err}")
 
     p = Path(out_jsonl_path)
     if not p.exists():
-        raise RuntimeError("Ficheiro de transcrição não encontrado (jsonl).")
+        exit_c = proc.exitcode
+        frozen = getattr(sys, "frozen", False)
+        hint = ""
+        if frozen:
+            hint = (
+                " No executável: confirme que o build inclui ctranslate2/onnxruntime; "
+                "na UI escolha «Forçar CPU» para Whisper; verifique ligação à Internet na 1.ª vez (descarga do modelo)."
+            )
+        raise RuntimeError(
+            f"Ficheiro de transcrição não encontrado (jsonl). Código de saída do worker: {exit_c!r}.{hint}"
+        )
     logger.info("A carregar transcrição do disco (%s)...", p.name)
     try:
         with p.open("r", encoding="utf-8") as f:

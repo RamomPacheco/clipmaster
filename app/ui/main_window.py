@@ -10,8 +10,17 @@ import time
 from pathlib import Path
 from typing import List
 
-from PySide6.QtCore import QRect, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QRect, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QDesktopServices,
+    QFont,
+    QImage,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,6 +49,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core import config
+from app.core.ffmpeg_bin import ffmpeg_available, get_ffprobe_path
 from app.core.api_key_store import ApiKeyStore
 from app.core.cuda_setup import inject_cuda_environment  # noqa: F401
 from app.core.logger import logger
@@ -53,10 +63,11 @@ from app.services.video_engine import (
     get_export_dimensions,
     tiktok_subtitle_style_sizes,
 )
+from app.services.ollama_launcher import OLLAMA_DOWNLOAD_URL, is_ollama_cli_on_path
 from app.workers.processing_task import VideoProcessorThread
 
-# Provedores que usam chave API na nuvem (Gemini, Groq, OpenAI, endpoint compatível).
-_CLOUD_LLM_API_PROVIDERS = frozenset({"gemini", "groq", "openai"})
+# Provedores que usam chave API na nuvem (Gemini, Groq, OpenAI, OpenRouter, etc.).
+_CLOUD_LLM_API_PROVIDERS = frozenset({"gemini", "groq", "openai", "openrouter"})
 
 
 class _ExportPreviewThread(QThread):
@@ -113,6 +124,36 @@ class ViralApp(QMainWindow):
         self._setup_ui()
         self._apply_dark_theme()
         self._refresh_status_bar()
+        QTimer.singleShot(0, self._warn_if_ollama_cli_missing)
+
+    def _warn_if_ollama_cli_missing(self) -> None:
+        """Se não houver Ollama no PATH, avisa que só APIs na nuvem estão disponíveis localmente."""
+        if is_ollama_cli_on_path():
+            return
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setWindowTitle("Ollama não encontrado")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(
+            "O comando <b>ollama</b> não foi encontrado no PATH deste sistema.<br><br>"
+            "A aplicação continua normalmente. Neste equipamento o modo "
+            "<b>Local (Ollama)</b> não estará disponível até instalar o Ollama."
+        )
+        msg.setInformativeText(
+            "Pode usar os motores via <b>API na nuvem</b> (Gemini, Groq, OpenAI ou OpenRouter) em "
+            "<b>Avançado</b> → <b>Provedor</b>.<br><br>"
+            f"Instalação oficial: <a href=\"{OLLAMA_DOWNLOAD_URL}\">{OLLAMA_DOWNLOAD_URL}</a>"
+        )
+        msg.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextBrowserInteraction
+        )
+        open_btn = msg.addButton(
+            "Abrir página de download", QMessageBox.ButtonRole.ActionRole
+        )
+        msg.addButton(QMessageBox.StandardButton.Ok)
+        msg.exec()
+        if msg.clickedButton() == open_btn:
+            QDesktopServices.openUrl(QUrl(OLLAMA_DOWNLOAD_URL))
 
     # ---------------- UI Setup ----------------
     def _get_gemini_models(self) -> List[str]:
@@ -194,14 +235,26 @@ class ViralApp(QMainWindow):
         ids = sorted(set(ids), key=str.lower)
         return True, ids
 
-    def _fetch_openai_style_models(self, base_url: str) -> tuple[bool, List[str]]:
-        """Lista modelos via GET {base}/models (OpenAI ou servidor compatível)."""
-        default = ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "o1-mini", "gpt-3.5-turbo"]
+    def _fetch_openai_style_models(
+        self,
+        base_url: str,
+        *,
+        env_key_name: str = "OPENAI_API_KEY",
+        default_models: List[str] | None = None,
+    ) -> tuple[bool, List[str]]:
+        """Lista modelos via GET {base}/models (OpenAI, OpenRouter ou servidor compatível)."""
+        default = default_models or [
+            "gpt-4o-mini",
+            "gpt-4o",
+            "gpt-4-turbo",
+            "o1-mini",
+            "gpt-3.5-turbo",
+        ]
         key = ""
         if hasattr(self, "edit_api_key"):
             key = self.edit_api_key.text().strip()
         if not key:
-            key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+            key = (os.environ.get(env_key_name) or "").strip()
         base = (base_url or "").strip().rstrip("/")
         if not base:
             base = "https://api.openai.com/v1"
@@ -249,6 +302,8 @@ class ViralApp(QMainWindow):
             return "gemini"
         if "groq" in text:
             return "groq"
+        if "openrouter" in text:
+            return "openrouter"
         if "openai" in text:
             return "openai"
         if "transformers" in text or "hugging face" in text:
@@ -283,6 +338,34 @@ class ViralApp(QMainWindow):
                 else "Lista padrão — cole a chave Groq e mude de campo ou de provedor para atualizar."
             )
             self.combo_model.setEditable(not live)
+        elif provider == "openrouter":
+            self.lbl_model.setText("Modelo de IA (OpenRouter):")
+            or_defaults = [
+                "openai/gpt-4o-mini",
+                "openai/gpt-4o",
+                "anthropic/claude-3.5-sonnet",
+                "google/gemini-2.0-flash-001",
+                "meta-llama/llama-3.3-70b-instruct",
+            ]
+            live, or_models = self._fetch_openai_style_models(
+                "https://openrouter.ai/api/v1",
+                env_key_name="OPENROUTER_API_KEY",
+                default_models=or_defaults,
+            )
+            self.combo_model.addItems(or_models)
+            prefer = "openai/gpt-4o-mini"
+            if prefer in or_models:
+                self.combo_model.setCurrentText(prefer)
+            elif or_models:
+                self.combo_model.setCurrentIndex(0)
+            self.combo_model.setToolTip(
+                "Ids no formato fornecedor/modelo (ex.: openai/gpt-4o-mini). "
+                "Lista pela API OpenRouter quando há chave; pode escrever qualquer modelo suportado."
+                if live
+                else "Lista de exemplo — cole a chave OpenRouter e altere o campo para atualizar a lista. "
+                "Pode escrever manualmente o id de qualquer modelo do catálogo OpenRouter."
+            )
+            self.combo_model.setEditable(True)
         elif provider == "openai":
             self.lbl_model.setText("Modelo de IA (OpenAI):")
             live, oa_models = self._fetch_openai_style_models("https://api.openai.com/v1")
@@ -350,6 +433,32 @@ class ViralApp(QMainWindow):
                 self.combo_social_model.setCurrentText(prev)
             elif "llama-3.3-70b-versatile" in models:
                 self.combo_social_model.setCurrentText("llama-3.3-70b-versatile")
+            elif models:
+                self.combo_social_model.setCurrentIndex(0)
+        elif provider == "openrouter":
+            or_defaults = [
+                "openai/gpt-4o-mini",
+                "openai/gpt-4o",
+                "anthropic/claude-3.5-sonnet",
+                "google/gemini-2.0-flash-001",
+                "meta-llama/llama-3.3-70b-instruct",
+            ]
+            live, models = self._fetch_openai_style_models(
+                "https://openrouter.ai/api/v1",
+                env_key_name="OPENROUTER_API_KEY",
+                default_models=or_defaults,
+            )
+            self.combo_social_model.addItems(models)
+            self.combo_social_model.setToolTip(
+                "Modelos OpenRouter para capa/descrição (pode editar o id manualmente)."
+                if live
+                else "Lista de exemplo — use chave OpenRouter para listar; pode escrever qualquer modelo."
+            )
+            self.combo_social_model.setEditable(True)
+            if prev in models:
+                self.combo_social_model.setCurrentText(prev)
+            elif "openai/gpt-4o-mini" in models:
+                self.combo_social_model.setCurrentText("openai/gpt-4o-mini")
             elif models:
                 self.combo_social_model.setCurrentIndex(0)
         elif provider == "openai":
@@ -852,6 +961,8 @@ class ViralApp(QMainWindow):
             self.lbl_api_key_row.setText("Chave API (Groq)")
         elif prov == "openai":
             self.lbl_api_key_row.setText("Chave API (OpenAI)")
+        elif prov == "openrouter":
+            self.lbl_api_key_row.setText("Chave API (OpenRouter)")
         else:
             self.lbl_api_key_row.setText("Chave API")
         # Carregar perfil/chave antes de pedir listas à API (nuvem).
@@ -932,6 +1043,16 @@ class ViralApp(QMainWindow):
             _, models = self._fetch_groq_model_list()
         elif prov == "openai":
             _, models = self._fetch_openai_style_models("https://api.openai.com/v1")
+        elif prov == "openrouter":
+            _, models = self._fetch_openai_style_models(
+                "https://openrouter.ai/api/v1",
+                env_key_name="OPENROUTER_API_KEY",
+                default_models=[
+                    "openai/gpt-4o-mini",
+                    "openai/gpt-4o",
+                    "anthropic/claude-3.5-sonnet",
+                ],
+            )
         else:
             models = self._get_available_models()
 
@@ -1049,6 +1170,7 @@ class ViralApp(QMainWindow):
         default_lbl = {
             "groq": "Chave API Groq",
             "openai": "Chave API OpenAI",
+            "openrouter": "Chave API OpenRouter",
         }.get(prov, "Chave API Gemini")
         dlg = SaveApiKeyDialog(
             self,
@@ -1100,37 +1222,73 @@ class ViralApp(QMainWindow):
         self._refresh_api_profile_combo()
         self.update_log(f"[*] Perfil de chave removido: {name}")
 
-    def _get_available_models(self) -> List[str]:
-        try:
-            import ollama
+    def _parse_ollama_list_models(self, models) -> List[str]:
+        model_list = (
+            models.get("models", [])
+            if isinstance(models, dict)
+            else getattr(models, "models", [])
+        )
+        model_names: List[str] = []
+        for model in model_list:
+            if isinstance(model, dict):
+                name = model.get("name") or model.get("model")
+            else:
+                name = getattr(model, "name", None) or getattr(model, "model", None)
+            if name:
+                model_names.append(name)
+            else:
+                logger.warning("Modelo com estrutura inesperada: %s", model)
+        return model_names
 
-            models = ollama.list()
-            model_list = (
-                models.get("models", [])
-                if isinstance(models, dict)
-                else getattr(models, "models", [])
-            )
-            model_names: List[str] = []
-            for model in model_list:
-                if isinstance(model, dict):
-                    name = model.get("name") or model.get("model")
-                else:
-                    name = getattr(model, "name", None) or getattr(model, "model", None)
-                if name:
-                    model_names.append(name)
-                else:
-                    logger.warning("Modelo com estrutura inesperada: %s", model)
-            return model_names or [config.DEFAULT_LLM_MODEL]
+    def _get_available_models(self) -> List[str]:
+        import ollama
+
+        def fetch_names() -> List[str]:
+            return self._parse_ollama_list_models(ollama.list())
+
+        try:
+            names = fetch_names()
+            return names if names else [config.DEFAULT_LLM_MODEL]
         except Exception as e:  # noqa: BLE001
-            logger.warning("Erro ao buscar modelos Ollama: %s", e)
+            logger.warning("Erro ao buscar modelos Ollama (antes de iniciar servidor): %s", e)
+            self.update_log(
+                f"[!] Ollama não respondeu ao listar modelos. A tentar iniciar `ollama serve`… ({e})"
+            )
+
+        from app.services.ollama_launcher import (
+            try_start_ollama_serve,
+            wait_until_ollama_list_ok,
+        )
+
+        ok, msg = try_start_ollama_serve()
+        self.update_log(f"{'[*]' if ok else '[!]'} {msg}")
+
+        if not ok:
+            return [config.DEFAULT_LLM_MODEL]
+
+        if not wait_until_ollama_list_ok():
+            logger.warning("Timeout à espera do Ollama após ollama serve.")
+            self.update_log(
+                "[!] Ollama não ficou disponível a tempo. Verifique `ollama serve` ou a instalação."
+            )
+            return [config.DEFAULT_LLM_MODEL]
+
+        self.update_log("[*] Ollama respondeu — a atualizar a lista de modelos.")
+
+        try:
+            names = fetch_names()
+            return names if names else [config.DEFAULT_LLM_MODEL]
+        except Exception as e2:  # noqa: BLE001
+            logger.warning("Erro ao buscar modelos Ollama (após iniciar servidor): %s", e2)
             return [config.DEFAULT_LLM_MODEL]
 
     def _get_video_height(self, file_path: str) -> int | None:
         """Retorna a altura do vídeo via ffprobe (ex.: 1080, 2160)."""
         try:
+            ffprobe = get_ffprobe_path() or "ffprobe"
             result = subprocess.run(
                 [
-                    "ffprobe",
+                    ffprobe,
                     "-v",
                     "error",
                     "-select_streams",
@@ -1202,11 +1360,12 @@ class ViralApp(QMainWindow):
             "gemini": "IA: Gemini (API)",
             "groq": "IA: Groq (API)",
             "openai": "IA: OpenAI (API)",
+            "openrouter": "IA: OpenRouter (API)",
             "transformers": "IA: Transformers (local)",
         }.get(prov, "IA: Ollama (local)")
 
-        ffmpeg_ok = shutil.which("ffmpeg") is not None
-        ff = "● FFmpeg: OK" if ffmpeg_ok else "○ FFmpeg: não encontrado no PATH"
+        ffmpeg_ok = ffmpeg_available()
+        ff = "● FFmpeg: OK" if ffmpeg_ok else "○ FFmpeg: não encontrado (instale ou use bundled/ffmpeg)"
         msg = f"Status  |  {cuda_line}  |  CPU: {cpu_info}  |  {ia_line}  |  {ff}"
         self.statusBar().showMessage(msg)
 
@@ -1399,6 +1558,7 @@ class ViralApp(QMainWindow):
                 "API (Gemini)",
                 "API (Groq)",
                 "API (OpenAI)",
+                "API (OpenRouter)",
                 "Local (Transformers)",
             ]
         )
@@ -1435,7 +1595,7 @@ class ViralApp(QMainWindow):
         self.combo_api_profile = QComboBox()
         self.combo_api_profile.setMinimumHeight(32)
         self.combo_api_profile.setToolTip(
-            "Perfis guardados para o provedor atual (Gemini, Groq ou OpenAI). "
+            "Perfis guardados para o provedor atual (Gemini, Groq, OpenAI ou OpenRouter). "
             "No Windows o ficheiro fica em AppData\\Local\\AI_Viral_Clipper\\api_keys.json."
         )
         self.btn_api_key_save = QPushButton("Guardar…")
@@ -2463,11 +2623,18 @@ class ViralApp(QMainWindow):
         self.worker.start()
 
     def update_log(self, text: str) -> None:
-        self.log_output.append(f"> {text}")
+        line = f"> {text}"
+        if hasattr(self, "log_output"):
+            self.log_output.append(line)
+        else:
+            logger.info("%s", line)
 
     def append_engine_log(self, text: str) -> None:
         """Linhas do módulo logging (mesmo formato que no terminal)."""
-        self.log_output.append(text)
+        if hasattr(self, "log_output"):
+            self.log_output.append(text)
+        else:
+            logger.info("%s", text)
 
     def update_processing_progress(self, current: int, maximum: int) -> None:
         """Atualiza a barra: ``maximum`` 0 ou negativo = indeterminado (pulsação)."""

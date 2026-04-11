@@ -26,16 +26,9 @@ Durante o processamento, a interface mostra uma **barra de progresso** (por fase
 python --version  # Verificar se é 3.10+
 ```
 
-2. **FFmpeg** (obrigatório)
-   - Download: https://ffmpeg.org/download.html
-   - Ou por Chocolatey (Windows):
-     ```powershell
-     choco install ffmpeg
-     ```
-   - Verificar:
-     ```powershell
-     ffmpeg -version
-     ```
+2. **FFmpeg** (obrigatório para desenvolvimento, a menos que use binários empacotados)
+   - **Opção A — empacotado com o projeto:** copie `ffmpeg.exe` e `ffprobe.exe` para `bundled/ffmpeg/windows/` (ou execute `scripts\fetch_ffmpeg_windows.ps1`).
+   - **Opção B — sistema:** https://ffmpeg.org/download.html ou `choco install ffmpeg`; verificar com `ffmpeg -version`.
 
 3. **Ollama** (opcional — para LLM local)
    - Download: https://ollama.ai
@@ -82,6 +75,21 @@ pip install -r requirements.txt
 # A partir da raiz do projeto
 python main.py
 ```
+
+### Empacotamento Windows (executável + instalador)
+
+1. Ambiente virtual ativo e `pip install -r requirements.txt`.
+2. (Recomendado) Incluir FFmpeg no build:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\fetch_ffmpeg_windows.ps1
+   ```
+3. Gerar `dist\ClipMaster\` e, se tiver [Inno Setup 6](https://jrsoftware.org/isdl.php), o ficheiro `dist_installer\ClipMaster_Setup_*.exe`:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\build_windows_release.ps1
+   ```
+   Modo não interativo / CI: acrescente `-SkipFFmpegCheck -Force`. Só PyInstaller: `-SkipInno`.
+
+**Utilizador final:** com o instalador, a app vai para `%LocalAppData%\Programs\ClipMaster\`; exports e histórico ficam em `%LocalAppData%\AI_Viral_Clipper\`.
 
 A interface gráfica abrirá. Siga os passos:
 

@@ -1,7 +1,26 @@
 import os
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def _local_app_dir() -> Path:
+    """Pasta persistente do utilizador (chaves API, exports instalados, histórico)."""
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    else:
+        base = Path.home() / ".local" / "share"
+    d = base / "AI_Viral_Clipper"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+PROJECT_ROOT = _project_root()
 
 
 def _whisper_language_from_env() -> str | None:
@@ -49,22 +68,30 @@ def whisper_device_effective() -> str:
         return "cpu"
     return _default_whisper_device()
 
-# Pasta padrão de exports (relativa à raiz do projeto antigo)
-EXPORTS_ROOT = PROJECT_ROOT / "exports"
+def _exports_root() -> Path:
+    if getattr(sys, "frozen", False):
+        p = _local_app_dir() / "exports"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    return PROJECT_ROOT / "exports"
 
-# Arquivo de histórico de processamento
-PROCESSING_HISTORY_FILE = PROJECT_ROOT / "processing_history.json"
+
+def _processing_history_file() -> Path:
+    if getattr(sys, "frozen", False):
+        return _local_app_dir() / "processing_history.json"
+    return PROJECT_ROOT / "processing_history.json"
+
+
+# Pasta padrão de exports (em desenvolvimento: raiz do repo; instalado: %LocalAppData%)
+EXPORTS_ROOT = _exports_root()
+
+# Histórico de processamento (mesma lógica)
+PROCESSING_HISTORY_FILE = _processing_history_file()
 
 
 def api_keys_storage_path() -> Path:
     """Ficheiro JSON com perfis de chaves API (nome + provedor + segredo)."""
-    if os.name == "nt":
-        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
-    else:
-        base = Path.home() / ".local" / "share"
-    d = base / "AI_Viral_Clipper"
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "api_keys.json"
+    return _local_app_dir() / "api_keys.json"
 
 # Parâmetros de clipes
 class LLMParams:
@@ -80,6 +107,18 @@ MAX_CLIP_SECONDS = 120.0
 CHUNK_SECONDS = 600.0
 # Sobreposição entre chunks (reduz cortes de ideia no meio entre blocos)
 CHUNK_OVERLAP_SECONDS = 30.0
+
+# ── Smart-snap: cortes mais limpos, independente do modelo ──
+# Janela de procura (segundos em torno do ponto da IA) para encontrar pausa/frase.
+SNAP_SEARCH_WINDOW_SEC = float(os.environ.get("CLIPMASTER_SNAP_WINDOW", "3.0"))
+# Pausa mínima entre palavras (ms) para ser considerada "corte bom".
+SNAP_MIN_PAUSE_MS = int(os.environ.get("CLIPMASTER_SNAP_PAUSE_MS", "300"))
+# Peso: pausas longas valem mais no score de snapping.
+SNAP_PAUSE_WEIGHT = float(os.environ.get("CLIPMASTER_SNAP_PAUSE_WEIGHT", "1.0"))
+# Peso: começar/terminar em fim-de-frase (. ? !) vale mais.
+SNAP_SENTENCE_WEIGHT = float(os.environ.get("CLIPMASTER_SNAP_SENTENCE_WEIGHT", "0.8"))
+# Peso: proximidade ao ponto original da IA (menos desvio = mais seguro).
+SNAP_PROXIMITY_WEIGHT = float(os.environ.get("CLIPMASTER_SNAP_PROXIMITY_WEIGHT", "0.5"))
 
 # Faster-Whisper — qualidade de timestamp e texto
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")

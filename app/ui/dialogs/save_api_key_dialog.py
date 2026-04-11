@@ -15,11 +15,12 @@ _API_OPTIONS: list[tuple[str, str]] = [
     ("Gemini", "gemini"),
     ("Groq", "groq"),
     ("OpenAI", "openai"),
+    ("OpenRouter", "openrouter"),
 ]
 
 
 class SaveApiKeyDialog(QDialog):
-    """Guarda um perfil nomeado de chave API (Gemini, Groq ou OpenAI)."""
+    """Guarda um perfil nomeado de chave API (Gemini, Groq, OpenAI ou OpenRouter)."""
 
     def __init__(
         self,

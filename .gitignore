@@ -59,6 +59,7 @@ pip-delete-this-directory.txt
 .ruff_cache/
 *.egg-info/
 dist/
+dist_installer/
 *.egg
 
 # Saída do app (clipes gerados)
