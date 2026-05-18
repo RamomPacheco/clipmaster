@@ -1,9 +1,15 @@
 from __future__ import annotations
+
 import subprocess
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import List
+
+from PySide6.QtCore import QDateTime
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDateTimeEdit,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -30,6 +36,7 @@ class ClipSelectionDialog(QDialog):
         self.selected_clips: List[Clip] = []
         self.checkboxes: List[tuple[QCheckBox, Clip]] = []
         self.edits: List[tuple[QLineEdit, QLineEdit]] = []
+        self.schedule_widgets: List[tuple[QCheckBox, QDateTimeEdit]] = []
 
         self.setWindowTitle("Selecione os Clipes para Salvar")
         self.setMinimumWidth(700)
@@ -123,6 +130,30 @@ class ClipSelectionDialog(QDialog):
             clip_layout.addWidget(lbl_edit_reason)
             clip_layout.addWidget(edit_reason)
 
+            row_sched = QHBoxLayout()
+            chk_sched = QCheckBox("Agendar envio ao TikTok (nesta data e hora)")
+            chk_sched.setToolTip(
+                "O ficheiro exportado só é enviado à TikTok Content Posting API na hora indicada. "
+                "A API oficial não documenta agendamento no servidor como na app TikTok; "
+                "o ClipMaster adia o upload até ao momento escolhido. "
+                "É necessário access token OAuth em Avançado → TikTok."
+            )
+            chk_sched.setStyleSheet(
+                "background: transparent; border: none; padding: 0px; margin: 0px;"
+            )
+            dt_sched = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
+            dt_sched.setCalendarPopup(True)
+            dt_sched.setMinimumDateTime(QDateTime.currentDateTime())
+            dt_sched.setDisplayFormat("yyyy-MM-dd HH:mm")
+            dt_sched.setMinimumHeight(28)
+            dt_sched.setEnabled(False)
+            chk_sched.toggled.connect(dt_sched.setEnabled)
+            row_sched.addWidget(chk_sched)
+            row_sched.addWidget(QLabel("Data/hora:"))
+            row_sched.addWidget(dt_sched, stretch=1)
+            clip_layout.addLayout(row_sched)
+            self.schedule_widgets.append((chk_sched, dt_sched))
+
             btn_preview = QPushButton("Pré-visualizar")
             btn_preview.clicked.connect(lambda checked, c=clip: self.preview_clip(c))
             clip_layout.addWidget(btn_preview)
@@ -158,6 +189,25 @@ class ClipSelectionDialog(QDialog):
 
         layout.addLayout(button_layout)
 
+    def accept(self) -> None:  # type: ignore[override]
+        margin_sec = 10
+        now = int(time.time())
+        for i, (checkbox, _clip) in enumerate(self.checkboxes):
+            if not checkbox.isChecked():
+                continue
+            chk_s, dt_e = self.schedule_widgets[i]
+            if not chk_s.isChecked():
+                continue
+            if dt_e.dateTime().toSecsSinceEpoch() <= now + margin_sec:
+                QMessageBox.warning(
+                    self,
+                    "Agendamento TikTok",
+                    "Para cada clipe com envio TikTok agendado, escolha uma data e hora "
+                    "ligeiramente no futuro.",
+                )
+                return
+        super().accept()
+
     def _select_all(self) -> None:
         for checkbox, _ in self.checkboxes:
             checkbox.setChecked(True)
@@ -171,11 +221,21 @@ class ClipSelectionDialog(QDialog):
         for i, (checkbox, clip) in enumerate(self.checkboxes):
             if checkbox.isChecked():
                 edit_headline, edit_reason = self.edits[i]
+                chk_s, dt_e = self.schedule_widgets[i]
+                sched_on = chk_s.isChecked()
+                sched_iso: str | None = None
+                if sched_on:
+                    secs = dt_e.dateTime().toSecsSinceEpoch()
+                    sched_iso = datetime.fromtimestamp(
+                        secs, tz=timezone.utc
+                    ).isoformat()
                 selected.append(
                     clip.model_copy(
                         update={
                             "headline": edit_headline.text(),
                             "reason": edit_reason.text(),
+                            "tiktok_schedule_enabled": sched_on,
+                            "tiktok_schedule_at": sched_iso if sched_on else None,
                         }
                     )
                 )

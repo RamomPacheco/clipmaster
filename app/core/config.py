@@ -93,6 +93,16 @@ def api_keys_storage_path() -> Path:
     """Ficheiro JSON com perfis de chaves API (nome + provedor + segredo)."""
     return _local_app_dir() / "api_keys.json"
 
+
+def tiktok_credentials_path() -> Path:
+    """Credenciais da app TikTok + token OAuth do criador (ficheiro local)."""
+    return _local_app_dir() / "tiktok_credentials.json"
+
+
+def tiktok_schedule_queue_path() -> Path:
+    """Fila persistente de clipes agendados para upload TikTok."""
+    return _local_app_dir() / "tiktok_schedule_queue.json"
+
 # Parâmetros de clipes
 class LLMParams:
     NUM_CTX = 4096

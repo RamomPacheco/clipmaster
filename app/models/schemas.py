@@ -51,6 +51,14 @@ class Clip(BaseModel):
     end: float = Field(..., gt=0)
     reason: str = ""
     headline: str = "Sem título"
+    tiktok_schedule_enabled: bool = Field(
+        default=False,
+        description="Se verdadeiro, após exportar o clipe é agendado envio à TikTok Content Posting API.",
+    )
+    tiktok_schedule_at: Optional[str] = Field(
+        default=None,
+        description="Momento UTC ISO 8601 em que o upload à TikTok deve ocorrer.",
+    )
     engagement_effects: List[str] = Field(
         default_factory=list,
         description=(

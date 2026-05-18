@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
 from app.core import config
 from app.core.ffmpeg_bin import ffmpeg_available, get_ffprobe_path
 from app.core.api_key_store import ApiKeyStore
+from app.core.tiktok_credentials_store import TikTokCredentials, TikTokCredentialsStore
 from app.core.cuda_setup import inject_cuda_environment  # noqa: F401
 from app.core.logger import logger
 from app.models.schemas import Clip, SocialCoverStyle, TiktokCaptionStyle
@@ -58,13 +59,17 @@ from app.ui.components.drop_zone import DropZone
 from app.ui.dialogs.clip_dialog import ClipSelectionDialog
 from app.ui.dialogs.save_api_key_dialog import SaveApiKeyDialog
 from app.ui.dialogs.youtube_download_dialog import YoutubeDownloadDialog
+from app.services.tiktok_queue_store import TikTokQueueStore
 from app.services.video_engine import (
+    EXPORT_CLIP_VIDEO_FILENAME,
+    clip_session_subdirectory,
     export_preview_frame_png_bytes,
     get_export_dimensions,
     tiktok_subtitle_style_sizes,
 )
 from app.services.ollama_launcher import OLLAMA_DOWNLOAD_URL, is_ollama_cli_on_path
 from app.workers.processing_task import VideoProcessorThread
+from app.workers.tiktok_post_worker import TikTokPublishWorker
 
 # Provedores que usam chave API na nuvem (Gemini, Groq, OpenAI, OpenRouter, etc.).
 _CLOUD_LLM_API_PROVIDERS = frozenset({"gemini", "groq", "openai", "openrouter"})
@@ -115,6 +120,14 @@ class ViralApp(QMainWindow):
         self._last_session_output_dir: Path | None = None
         self.worker: VideoProcessorThread | None = None
         self._api_key_store = ApiKeyStore()
+        self._tiktok_creds_store = TikTokCredentialsStore()
+        self._tiktok_queue = TikTokQueueStore()
+        self._tiktok_queue.reset_stuck_uploading()
+        self._tiktok_worker: TikTokPublishWorker | None = None
+        self._tiktok_scheduler = QTimer(self)
+        self._tiktok_scheduler.setInterval(15_000)
+        self._tiktok_scheduler.timeout.connect(self._tiktok_scheduler_tick)
+        self._tiktok_scheduler.start()
         self._export_preview_pixmap = QPixmap()
         self._preview_job_id = 0
         self._active_preview_thread: _ExportPreviewThread | None = None
@@ -1632,6 +1645,68 @@ class ViralApp(QMainWindow):
         gb_ai.setLayout(ai_form)
         adv_layout.addWidget(gb_ai)
 
+        gb_tiktok = QGroupBox("TikTok — publicação agendada (Content Posting API)")
+        gb_tiktok.setToolTip(
+            "Client Key e Client Secret vêm da app em developers.tiktok.com. "
+            "O access token é obtido via Login Kit / OAuth com o scope video.publish. "
+            "No seletor de clipes, marque data e hora por vídeo; após exportar, o envio "
+            "corre automaticamente nessa hora (fila em segundo plano)."
+        )
+        tik_form = QGridLayout()
+        tik_form.setColumnStretch(1, 1)
+        lbl_tk_ck = QLabel("Client Key")
+        lbl_tk_ck.setStyleSheet("color: #aaaaaa;")
+        self.edit_tiktok_client_key = QLineEdit()
+        self.edit_tiktok_client_key.setPlaceholderText("Chave da app TikTok (OAuth)")
+        self.edit_tiktok_client_key.setMinimumHeight(30)
+        lbl_tk_cs = QLabel("Client Secret")
+        lbl_tk_cs.setStyleSheet("color: #aaaaaa;")
+        self.edit_tiktok_client_secret = QLineEdit()
+        self.edit_tiktok_client_secret.setEchoMode(QLineEdit.Password)
+        self.edit_tiktok_client_secret.setPlaceholderText("Segredo da app")
+        self.edit_tiktok_client_secret.setMinimumHeight(30)
+        lbl_tk_at = QLabel("Access token")
+        lbl_tk_at.setStyleSheet("color: #aaaaaa;")
+        self.edit_tiktok_access_token = QLineEdit()
+        self.edit_tiktok_access_token.setEchoMode(QLineEdit.Password)
+        self.edit_tiktok_access_token.setPlaceholderText("Token OAuth do criador (video.publish)")
+        self.edit_tiktok_access_token.setMinimumHeight(30)
+        lbl_tk_rt = QLabel("Refresh token (opc.)")
+        lbl_tk_rt.setStyleSheet("color: #aaaaaa;")
+        self.edit_tiktok_refresh_token = QLineEdit()
+        self.edit_tiktok_refresh_token.setEchoMode(QLineEdit.Password)
+        self.edit_tiktok_refresh_token.setPlaceholderText("Para renovar o access token")
+        self.edit_tiktok_refresh_token.setMinimumHeight(30)
+        lbl_tk_pr = QLabel("Privacidade do post")
+        lbl_tk_pr.setStyleSheet("color: #aaaaaa;")
+        self.combo_tiktok_privacy = QComboBox()
+        self.combo_tiktok_privacy.setMinimumHeight(30)
+        self.combo_tiktok_privacy.addItem("Só eu (SELF_ONLY)", "SELF_ONLY")
+        self.combo_tiktok_privacy.addItem("Público", "PUBLIC_TO_EVERYONE")
+        self.combo_tiktok_privacy.addItem(
+            "Seguidores mútuos", "MUTUAL_FOLLOW_FRIENDS"
+        )
+        self.combo_tiktok_privacy.addItem(
+            "Seguidores do criador", "FOLLOWER_OF_CREATOR"
+        )
+        self.btn_tiktok_save_creds = QPushButton("Guardar credenciais TikTok")
+        self.btn_tiktok_save_creds.setObjectName("secondaryButton")
+        self.btn_tiktok_save_creds.clicked.connect(self._on_save_tiktok_credentials)
+        tik_form.addWidget(lbl_tk_ck, 0, 0, Qt.AlignRight)
+        tik_form.addWidget(self.edit_tiktok_client_key, 0, 1)
+        tik_form.addWidget(lbl_tk_cs, 1, 0, Qt.AlignRight)
+        tik_form.addWidget(self.edit_tiktok_client_secret, 1, 1)
+        tik_form.addWidget(lbl_tk_at, 2, 0, Qt.AlignRight)
+        tik_form.addWidget(self.edit_tiktok_access_token, 2, 1)
+        tik_form.addWidget(lbl_tk_rt, 3, 0, Qt.AlignRight)
+        tik_form.addWidget(self.edit_tiktok_refresh_token, 3, 1)
+        tik_form.addWidget(lbl_tk_pr, 4, 0, Qt.AlignRight)
+        tik_form.addWidget(self.combo_tiktok_privacy, 4, 1)
+        tik_form.addWidget(self.btn_tiktok_save_creds, 5, 1)
+        gb_tiktok.setLayout(tik_form)
+        adv_layout.addWidget(gb_tiktok)
+        self._load_tiktok_credentials_into_fields()
+
         gb_whisper = QGroupBox("Transcrição (Faster-Whisper)")
         whisper_form = QGridLayout()
         lbl_whisper_model = QLabel("Modelo Whisper")
@@ -2575,6 +2650,12 @@ class ViralApp(QMainWindow):
         self.combo_social_model_source.setEnabled(False)
         self.combo_social_model.setEnabled(False)
         self.chk_social_cover.setEnabled(False)
+        self.edit_tiktok_client_key.setEnabled(False)
+        self.edit_tiktok_client_secret.setEnabled(False)
+        self.edit_tiktok_access_token.setEnabled(False)
+        self.edit_tiktok_refresh_token.setEnabled(False)
+        self.combo_tiktok_privacy.setEnabled(False)
+        self.btn_tiktok_save_creds.setEnabled(False)
 
         self.progress_bar.setProperty("state", "normal")
         self.progress_bar.setVisible(True)
@@ -2704,6 +2785,8 @@ class ViralApp(QMainWindow):
     def on_finished(self, msg: str) -> None:
         if self.worker is not None:
             self._last_session_output_dir = self.worker.output_dir
+            if "Sucesso!" in msg:
+                self._enqueue_tiktok_jobs_after_export()
         self.log_output.append(f"\n[+] {msg}")
         self._unlock_ui_after_process()
 
@@ -2738,6 +2821,89 @@ class ViralApp(QMainWindow):
         except Exception as e:  # noqa: BLE001
             logger.warning("Falha ao abrir pasta de saída: %s", e)
 
+    def _load_tiktok_credentials_into_fields(self) -> None:
+        c = self._tiktok_creds_store.get()
+        self.edit_tiktok_client_key.setText(c.client_key)
+        self.edit_tiktok_client_secret.setText(c.client_secret)
+        self.edit_tiktok_access_token.setText(c.access_token)
+        self.edit_tiktok_refresh_token.setText(c.refresh_token)
+
+    def _on_save_tiktok_credentials(self) -> None:
+        creds = TikTokCredentials(
+            client_key=self.edit_tiktok_client_key.text().strip(),
+            client_secret=self.edit_tiktok_client_secret.text().strip(),
+            access_token=self.edit_tiktok_access_token.text().strip(),
+            refresh_token=self.edit_tiktok_refresh_token.text().strip(),
+        )
+        self._tiktok_creds_store.save(creds)
+        QMessageBox.information(
+            self,
+            "TikTok",
+            "Credenciais guardadas no disco local (pasta da aplicação ClipMaster).",
+        )
+
+    def _enqueue_tiktok_jobs_after_export(self) -> None:
+        w = self.worker
+        if w is None or not w.selected_clips:
+            return
+        out = w.output_dir
+        if out is None:
+            return
+        privacy_raw = self.combo_tiktok_privacy.currentData()
+        privacy = str(privacy_raw) if privacy_raw else "SELF_ONLY"
+        any_sched = False
+        for i, clip in enumerate(w.selected_clips, start=1):
+            if not clip.tiktok_schedule_enabled or not clip.tiktok_schedule_at:
+                continue
+            any_sched = True
+            vp = clip_session_subdirectory(out, i) / EXPORT_CLIP_VIDEO_FILENAME
+            if not vp.is_file():
+                self.update_log(
+                    f"[!] TikTok: ficheiro em falta para clipe {i} ({vp.name}), fila não criada."
+                )
+                continue
+            job = self._tiktok_queue.add_job(
+                video_path=vp,
+                title=clip.headline,
+                privacy_level=privacy,
+                run_at_iso=clip.tiktok_schedule_at,
+            )
+            self.update_log(
+                f"[TikTok] Agendado clipe {i} — envio UTC {clip.tiktok_schedule_at} (job …{job.id[:8]})"
+            )
+        if any_sched and not self._tiktok_creds_store.get().has_upload_token():
+            self.update_log(
+                "[!] TikTok: sem access token guardado — preencha e guarde em Avançado antes da hora de envio."
+            )
+
+    def _tiktok_scheduler_tick(self) -> None:
+        if self._tiktok_worker is not None and self._tiktok_worker.isRunning():
+            return
+        creds = self._tiktok_creds_store.get()
+        if not creds.has_upload_token():
+            return
+        job = self._tiktok_queue.claim_next_due()
+        if job is None:
+            return
+        self.update_log(f"> [TikTok] A iniciar envio agendado (job …{job.id[:8]})")
+        worker = TikTokPublishWorker(job, creds.access_token, self)
+        worker.succeeded.connect(self._on_tiktok_job_succeeded)
+        worker.failed.connect(self._on_tiktok_job_failed)
+        worker.finished.connect(self._on_tiktok_worker_finished)
+        self._tiktok_worker = worker
+        worker.start()
+
+    def _on_tiktok_worker_finished(self) -> None:
+        self._tiktok_worker = None
+
+    def _on_tiktok_job_succeeded(self, job_id: str, publish_id: str) -> None:
+        self._tiktok_queue.mark_done(job_id, publish_id)
+        self.update_log(f"[✓] TikTok: envio concluído (publish_id={publish_id})")
+
+    def _on_tiktok_job_failed(self, job_id: str, message: str) -> None:
+        self._tiktok_queue.mark_failed(job_id, message)
+        self.update_log(f"[!] TikTok: envio falhou — {message}")
+
     def _unlock_ui_after_process(self) -> None:
         self.btn_action.setEnabled(True)
         self.tabs.setEnabled(True)
@@ -2757,6 +2923,12 @@ class ViralApp(QMainWindow):
         self.chk_enable_social_package.setEnabled(True)
         self._apply_social_package_controls_state()
         self._apply_caption_look_state()
+        self.edit_tiktok_client_key.setEnabled(True)
+        self.edit_tiktok_client_secret.setEnabled(True)
+        self.edit_tiktok_access_token.setEnabled(True)
+        self.edit_tiktok_refresh_token.setEnabled(True)
+        self.combo_tiktok_privacy.setEnabled(True)
+        self.btn_tiktok_save_creds.setEnabled(True)
 
     def reset_ui_for_new_video(self) -> None:
         self.current_video_path = None

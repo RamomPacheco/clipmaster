@@ -11,18 +11,20 @@ echo   ClipMaster - iniciando...
 echo ========================================
 echo.
 
-if exist ".venv\Scripts\activate.bat" (
-    call ".venv\Scripts\activate.bat"
-    echo [*] Ambiente virtual ativado: .venv
+set "PY=%~dp0.venv\Scripts\python.exe"
+
+if exist "%PY%" (
+    echo [*] Python do venv: %PY%
 ) else (
     echo [!] Pasta .venv nao encontrada.
     echo     Primeira vez? Execute:  python setup_and_run.py
     echo     Ou crie o venv manualmente e instale: pip install -r requirements.txt
+    set "PY=python"
     echo [*] Usando Python do PATH...
     echo.
 )
 
-python main.py
+"%PY%" main.py
 set EXITCODE=%ERRORLEVEL%
 
 if %EXITCODE% neq 0 (
